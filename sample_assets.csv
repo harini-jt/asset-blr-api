@@ -1,0 +1,11 @@
+asset_id,name,category,location_id,status,owner_cost_center,vendor,serial_number,tag_id,purchase_date,warranty_expiry
+PUMP-001,Hydraulic Pump A,Pumps,1,Active,PROD-001,Acme Industrial,SN-PUMP-001,TAG-P001,2023-01-15,2025-01-15
+PUMP-002,Hydraulic Pump B,Pumps,1,Active,PROD-001,Acme Industrial,SN-PUMP-002,TAG-P002,2023-02-20,2025-02-20
+CONV-001,Conveyor Belt System,Conveyors,1,Active,PROD-002,BeltCo,SN-CONV-001,TAG-C001,2022-06-10,2024-06-10
+HVAC-001,HVAC Unit - Building A,HVAC,2,Active,FAC-001,CoolAir Systems,SN-HVAC-001,TAG-H001,2021-03-05,2026-03-05
+ELEC-001,Electrical Panel Main,Electrical,2,Active,FAC-001,PowerTech,SN-ELEC-001,TAG-E001,2020-12-01,2025-12-01
+MACH-001,CNC Machine,Production Equipment,1,Active,PROD-003,MachinePro,SN-MACH-001,TAG-M001,2023-08-15,2026-08-15
+MACH-002,Lathe Machine,Production Equipment,1,In Maintenance,PROD-003,MachinePro,SN-MACH-002,TAG-M002,2022-11-20,2025-11-20
+COMP-001,Air Compressor,Utilities,3,Active,FAC-002,AirFlow Inc,SN-COMP-001,TAG-AC001,2023-04-10,2025-04-10
+FORK-001,Forklift 1,Material Handling,3,Active,WARE-001,LiftCo,SN-FORK-001,TAG-F001,2023-05-25,2025-05-25
+FORK-002,Forklift 2,Material Handling,3,Active,WARE-001,LiftCo,SN-FORK-002,TAG-F002,2023-05-25,2025-05-25
