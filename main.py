@@ -6,6 +6,11 @@ from datetime import datetime, date, timedelta
 from enum import Enum
 import csv
 import io
+from typing import Optional, List
+from datetime import datetime, date, timedelta
+from enum import Enum
+import csv
+import io
 
 # ============================================
 # Database Setup
@@ -33,6 +38,12 @@ class AssetStatus(str, Enum):
     RETIRED = "Retired"
 
 
+class AssetState(str, Enum):
+    GOOD = "Good"
+    BAD = "Bad"
+    UGLY = "Ugly"
+
+
 class WorkOrderStatus(str, Enum):
     OPEN = "Open"
     IN_PROGRESS = "In Progress"
@@ -54,6 +65,25 @@ class PMFrequencyUnit(str, Enum):
 
 
 # ============================================
+# Models - Vendor
+# ============================================
+class Vendor(SQLModel, table=True):
+    __tablename__ = "vendors"
+    
+    id: Optional[int] = Field(default=None, primary_key=True)
+    name: str = Field(index=True)
+    description: Optional[str] = None
+    address: Optional[str] = None
+    contact: Optional[str] = None
+    email: Optional[str] = None
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    
+    # Relationships
+    assets: List["Asset"] = Relationship(back_populates="vendor_rel")
+
+
+# ============================================
 # Models - Location
 # ============================================
 class Location(SQLModel, table=True):
@@ -65,7 +95,7 @@ class Location(SQLModel, table=True):
     parent_id: Optional[int] = Field(default=None, foreign_key="locations.id")
     
     # Relationships
-    assets: List["Asset"] = Relationship(back_populates="location")
+    assets: List["Asset"] = Relationship(back_populates="location_rel")
     
 
 # ============================================
@@ -85,14 +115,27 @@ class Asset(SQLModel, table=True):
     owner_cost_center: Optional[str] = None
     
     # Vendor & Identification
-    vendor: Optional[str] = None
+    vendor_name: Optional[str] = None  # Legacy field - vendor name as string
+    vendor_id: Optional[int] = Field(default=None, foreign_key="vendors.id")
     serial_number: Optional[str] = Field(default=None, unique=True)
     tag_id: Optional[str] = Field(default=None, unique=True)
+    sap_id: Optional[str] = None  # SAP identifier (numbers only)
     
     # Purchase & Warranty
     purchase_date: Optional[date] = None
     warranty_expiry: Optional[date] = None
+    warranty_date: Optional[date] = None
     purchase_cost: Optional[float] = None
+    invoice_number: Optional[str] = None
+    invoice_date: Optional[date] = None
+    capitalised_on: Optional[date] = None
+    
+    # Organization
+    company_code: Optional[str] = Field(default="IN07")
+    plant_code: Optional[str] = Field(default="IN08")
+    currency: Optional[str] = Field(default="INR")
+    location_name: Optional[str] = Field(default="Plant - Bangalore")  # Renamed to avoid conflict
+    state: Optional[AssetState] = None
     
     # Tracking
     meter_reading: Optional[float] = None  # For runtime-based PM
@@ -101,10 +144,13 @@ class Asset(SQLModel, table=True):
     updated_at: datetime = Field(default_factory=datetime.utcnow)
     
     # Relationships
-    location: Optional[Location] = Relationship(back_populates="assets")
+    location_rel: Optional[Location] = Relationship(back_populates="assets")
+    vendor_rel: Optional[Vendor] = Relationship(back_populates="assets")
     work_orders: List["WorkOrderAsset"] = Relationship(back_populates="asset")
     pm_templates: List["PMTemplate"] = Relationship(back_populates="asset")
 
+    #---------------- Removed duplicate invoice fields ----------------#
+    
 
 # ============================================
 # Models - Work Orders
@@ -272,15 +318,210 @@ def get_locations(session: Session = Depends(get_session)):
 
 
 # ============================================
+# VENDOR ENDPOINTS
+# ============================================
+@app.post("/vendors", response_model=Vendor)
+def create_vendor(vendor: Vendor, session: Session = Depends(get_session)):
+    # Convert date strings to Python datetime objects
+    vendor = convert_vendor_dates(vendor)
+    
+    # Ensure datetime fields are datetime objects
+    vendor.created_at = datetime.utcnow()
+    vendor.updated_at = datetime.utcnow()
+    session.add(vendor)
+    
+    try:
+        session.commit()
+    except Exception as e:
+        session.rollback()
+        # Handle specific constraint violations
+        if "UNIQUE constraint failed:" in str(e):
+            raise HTTPException(status_code=400, detail=f"A vendor with this information already exists. Please check for duplicates.")
+        else:
+            # Re-raise other errors
+            raise HTTPException(status_code=400, detail=f"Error creating vendor: {str(e)}")
+    
+    session.refresh(vendor)
+    return vendor
+
+
+@app.get("/vendors", response_model=List[Vendor])
+def get_vendors(session: Session = Depends(get_session)):
+    vendors = session.exec(select(Vendor)).all()
+    return vendors
+
+
+@app.get("/vendors/{vendor_id}", response_model=Vendor)
+def get_vendor(vendor_id: int, session: Session = Depends(get_session)):
+    vendor = session.get(Vendor, vendor_id)
+    if not vendor:
+        raise HTTPException(status_code=404, detail="Vendor not found")
+    return vendor
+
+
+@app.put("/vendors/{vendor_id}", response_model=Vendor)
+def update_vendor(vendor_id: int, vendor_update: Vendor, session: Session = Depends(get_session)):
+    vendor = session.get(Vendor, vendor_id)
+    if not vendor:
+        raise HTTPException(status_code=404, detail="Vendor not found")
+    
+    # Convert date strings to Python datetime objects
+    vendor_update = convert_vendor_dates(vendor_update)
+    
+    vendor_data = vendor_update.dict(exclude_unset=True)
+    for key, value in vendor_data.items():
+        if key not in ['created_at'] and hasattr(vendor, key):
+            setattr(vendor, key, value)
+    
+    vendor.updated_at = datetime.utcnow()
+    session.add(vendor)
+    
+    try:
+        session.commit()
+    except Exception as e:
+        session.rollback()
+        # Handle specific constraint violations
+        if "UNIQUE constraint failed:" in str(e):
+            raise HTTPException(status_code=400, detail=f"A vendor with this information already exists. Please check for duplicates.")
+        else:
+            # Re-raise other errors
+            raise HTTPException(status_code=400, detail=f"Error updating vendor: {str(e)}")
+    
+    session.refresh(vendor)
+    return vendor
+
+
+@app.delete("/vendors/{vendor_id}")
+def delete_vendor(vendor_id: int, session: Session = Depends(get_session)):
+    vendor = session.get(Vendor, vendor_id)
+    if not vendor:
+        raise HTTPException(status_code=404, detail="Vendor not found")
+    
+    session.delete(vendor)
+    session.commit()
+    return {"message": "Vendor deleted successfully"}
+
+
+# ============================================
+# Helper Functions
+# ============================================
+
+def parse_date_string(date_string: str | None) -> date | None:
+    """Convert date string to Python date object"""
+    if not date_string:
+        return None
+    if isinstance(date_string, date):
+        return date_string  # Already a date object
+    try:
+        return datetime.strptime(date_string, '%Y-%m-%d').date()
+    except (ValueError, TypeError):
+        return None
+
+
+def parse_datetime_string(datetime_string: str | None) -> datetime | None:
+    """Convert datetime string to Python datetime object"""
+    if not datetime_string:
+        return None
+    if isinstance(datetime_string, datetime):
+        return datetime_string  # Already a datetime object
+    try:
+        # Handle ISO format with or without milliseconds/timezone
+        if 'T' in datetime_string:
+            # ISO format: 2025-12-10T10:30:00 or 2025-12-10T10:30:00.123Z
+            datetime_string = datetime_string.replace('Z', '').split('.')[0]
+            return datetime.fromisoformat(datetime_string)
+        else:
+            # Just date format: 2025-12-10
+            return datetime.strptime(datetime_string, '%Y-%m-%d')
+    except (ValueError, TypeError):
+        return None
+
+
+def convert_asset_dates(asset: Asset) -> Asset:
+    """Convert string dates to Python date objects in an Asset"""
+    if asset.purchase_date and isinstance(asset.purchase_date, str):
+        asset.purchase_date = parse_date_string(asset.purchase_date)
+    if asset.warranty_expiry and isinstance(asset.warranty_expiry, str):
+        asset.warranty_expiry = parse_date_string(asset.warranty_expiry)
+    if asset.warranty_date and isinstance(asset.warranty_date, str):
+        asset.warranty_date = parse_date_string(asset.warranty_date)
+    if asset.invoice_date and isinstance(asset.invoice_date, str):
+        asset.invoice_date = parse_date_string(asset.invoice_date)
+    if asset.capitalised_on and isinstance(asset.capitalised_on, str):
+        asset.capitalised_on = parse_date_string(asset.capitalised_on)
+    return asset
+
+
+def convert_vendor_dates(vendor: Vendor) -> Vendor:
+    """Convert string datetimes to Python datetime objects in a Vendor"""
+    if vendor.created_at and isinstance(vendor.created_at, str):
+        vendor.created_at = parse_datetime_string(vendor.created_at)
+    if vendor.updated_at and isinstance(vendor.updated_at, str):
+        vendor.updated_at = parse_datetime_string(vendor.updated_at)
+    return vendor
+
+
+def convert_work_order_dates(work_order: WorkOrder) -> WorkOrder:
+    """Convert string datetimes to Python datetime objects in a WorkOrder"""
+    if work_order.due_date and isinstance(work_order.due_date, str):
+        work_order.due_date = parse_datetime_string(work_order.due_date)
+    if work_order.created_at and isinstance(work_order.created_at, str):
+        work_order.created_at = parse_datetime_string(work_order.created_at)
+    if work_order.started_at and isinstance(work_order.started_at, str):
+        work_order.started_at = parse_datetime_string(work_order.started_at)
+    if work_order.completed_at and isinstance(work_order.completed_at, str):
+        work_order.completed_at = parse_datetime_string(work_order.completed_at)
+    return work_order
+
+
+def convert_pm_template_dates(pm_template: PMTemplate) -> PMTemplate:
+    """Convert string datetimes to Python datetime objects in a PMTemplate"""
+    if pm_template.last_generated_date and isinstance(pm_template.last_generated_date, str):
+        pm_template.last_generated_date = parse_datetime_string(pm_template.last_generated_date)
+    if pm_template.next_due_date and isinstance(pm_template.next_due_date, str):
+        pm_template.next_due_date = parse_datetime_string(pm_template.next_due_date)
+    if pm_template.created_at and isinstance(pm_template.created_at, str):
+        pm_template.created_at = parse_datetime_string(pm_template.created_at)
+    return pm_template
+
+
+def convert_inventory_item_dates(item: InventoryItem) -> InventoryItem:
+    """Convert string datetimes to Python datetime objects in an InventoryItem"""
+    if item.created_at and isinstance(item.created_at, str):
+        item.created_at = parse_datetime_string(item.created_at)
+    if item.updated_at and isinstance(item.updated_at, str):
+        item.updated_at = parse_datetime_string(item.updated_at)
+    return item
+
+
+# ============================================
 # ASSET REGISTRY ENDPOINTS
 # ============================================
 @app.post("/assets", response_model=Asset)
 def create_asset(asset: Asset, session: Session = Depends(get_session)):
-    # Ensure datetime fields are datetime objects, not strings
+    # Convert date strings to Python date objects
+    asset = convert_asset_dates(asset)
+    
+    # Ensure datetime fields are datetime objects
     asset.created_at = datetime.utcnow()
     asset.updated_at = datetime.utcnow()
     session.add(asset)
-    session.commit()
+    
+    try:
+        session.commit()
+    except Exception as e:
+        session.rollback()
+        # Handle specific constraint violations
+        if "UNIQUE constraint failed: assets.asset_id" in str(e):
+            raise HTTPException(status_code=400, detail=f"Asset ID '{asset.asset_id}' already exists. Please use a unique Asset ID.")
+        elif "UNIQUE constraint failed: assets.serial_number" in str(e):
+            raise HTTPException(status_code=400, detail=f"Serial number '{asset.serial_number}' already exists. Please use a unique serial number.")
+        elif "UNIQUE constraint failed: assets.tag_id" in str(e):
+            raise HTTPException(status_code=400, detail=f"Tag ID '{asset.tag_id}' already exists. Please use a unique tag ID.")
+        else:
+            # Re-raise other errors
+            raise HTTPException(status_code=400, detail=f"Error creating asset: {str(e)}")
+    
     session.refresh(asset)
     return asset
 
@@ -328,19 +569,34 @@ def update_asset(asset_id: int, asset_update: Asset, session: Session = Depends(
     if not db_asset:
         raise HTTPException(status_code=404, detail="Asset not found")
     
+    # Convert date strings to Python date objects
+    asset_update = convert_asset_dates(asset_update)
+    
     asset_data = asset_update.dict(exclude_unset=True)
     asset_data["updated_at"] = datetime.utcnow()
     
-    # Skip datetime fields that come as strings - they're already in the DB
+    # Update asset fields
     for key, value in asset_data.items():
-        if key not in ['created_at', 'updated_at'] or not isinstance(value, str):
+        if key not in ['created_at'] and hasattr(db_asset, key):
             setattr(db_asset, key, value)
     
-    # Ensure updated_at is a datetime object
-    db_asset.updated_at = datetime.utcnow()
-    
     session.add(db_asset)
-    session.commit()
+    
+    try:
+        session.commit()
+    except Exception as e:
+        session.rollback()
+        # Handle specific constraint violations
+        if "UNIQUE constraint failed: assets.asset_id" in str(e):
+            raise HTTPException(status_code=400, detail=f"Asset ID '{db_asset.asset_id}' already exists. Please use a unique Asset ID.")
+        elif "UNIQUE constraint failed: assets.serial_number" in str(e):
+            raise HTTPException(status_code=400, detail=f"Serial number '{db_asset.serial_number}' already exists. Please use a unique serial number.")
+        elif "UNIQUE constraint failed: assets.tag_id" in str(e):
+            raise HTTPException(status_code=400, detail=f"Tag ID '{db_asset.tag_id}' already exists. Please use a unique tag ID.")
+        else:
+            # Re-raise other errors
+            raise HTTPException(status_code=400, detail=f"Error updating asset: {str(e)}")
+    
     session.refresh(db_asset)
     return db_asset
 
@@ -378,14 +634,12 @@ async def bulk_import_assets(file: UploadFile = File(...), session: Session = De
     
     for row_num, row in enumerate(csv_reader, start=2):
         try:
-            # Parse dates if present
-            purchase_date = None
-            warranty_expiry = None
-            
-            if row.get('purchase_date'):
-                purchase_date = datetime.strptime(row['purchase_date'], '%Y-%m-%d').date()
-            if row.get('warranty_expiry'):
-                warranty_expiry = datetime.strptime(row['warranty_expiry'], '%Y-%m-%d').date()
+            # Parse dates if present using helper function
+            purchase_date = parse_date_string(row.get('purchase_date'))
+            warranty_expiry = parse_date_string(row.get('warranty_expiry'))
+            invoice_date = parse_date_string(row.get('invoice_date'))
+            capitalised_on = parse_date_string(row.get('capitalised_on'))
+            warranty_date = parse_date_string(row.get('warranty_date'))
             
             asset = Asset(
                 asset_id=row['asset_id'],
@@ -394,11 +648,25 @@ async def bulk_import_assets(file: UploadFile = File(...), session: Session = De
                 status=row.get('status', AssetStatus.ACTIVE),
                 location_id=int(row['location_id']) if row.get('location_id') else None,
                 owner_cost_center=row.get('owner_cost_center'),
-                vendor=row.get('vendor'),
+                vendor_name=row.get('vendor'),  # Use vendor_name instead of vendor
+                vendor_id=int(row['vendor_id']) if row.get('vendor_id') else None,
                 serial_number=row.get('serial_number'),
                 tag_id=row.get('tag_id'),
+                sap_id=row.get('sap_id'),
                 purchase_date=purchase_date,
                 warranty_expiry=warranty_expiry,
+                warranty_date=warranty_date,
+                invoice_date=invoice_date,
+                capitalised_on=capitalised_on,
+                invoice_number=row.get('invoice_number'),
+                purchase_cost=float(row['purchase_cost']) if row.get('purchase_cost') else None,
+                company_code=row.get('company_code', 'IN07'),
+                plant_code=row.get('plant_code', 'IN08'),
+                currency=row.get('currency', 'INR'),
+                location_name=row.get('location_name', 'Plant - Bangalore'),
+                state=row.get('state'),
+                created_at=datetime.utcnow(),
+                updated_at=datetime.utcnow()
             )
             session.add(asset)
             imported_count += 1
@@ -422,6 +690,11 @@ def create_work_order(
     asset_ids: List[int] = Query([]),
     session: Session = Depends(get_session)
 ):
+    # Convert date strings to Python datetime objects
+    work_order = convert_work_order_dates(work_order)
+    
+    # Ensure datetime fields are datetime objects
+    work_order.created_at = datetime.utcnow()
     session.add(work_order)
     session.commit()
     session.refresh(work_order)
@@ -540,6 +813,12 @@ def get_work_order_assets(wo_id: int, session: Session = Depends(get_session)):
 # ============================================
 @app.post("/pm-templates", response_model=PMTemplate)
 def create_pm_template(pm: PMTemplate, session: Session = Depends(get_session)):
+    # Convert date strings to Python datetime objects
+    pm = convert_pm_template_dates(pm)
+    
+    # Ensure datetime fields are datetime objects
+    pm.created_at = datetime.utcnow()
+    
     # Calculate next due date
     if pm.frequency_unit == PMFrequencyUnit.DAYS:
         pm.next_due_date = datetime.utcnow() + timedelta(days=pm.frequency_value)
@@ -631,8 +910,25 @@ def generate_work_order_from_pm(pm_id: int, session: Session = Depends(get_sessi
 # ============================================
 @app.post("/inventory", response_model=InventoryItem)
 def create_inventory_item(item: InventoryItem, session: Session = Depends(get_session)):
+    # Convert date strings to Python datetime objects
+    item = convert_inventory_item_dates(item)
+    
+    # Ensure datetime fields are datetime objects
+    item.created_at = datetime.utcnow()
+    item.updated_at = datetime.utcnow()
     session.add(item)
-    session.commit()
+    
+    try:
+        session.commit()
+    except Exception as e:
+        session.rollback()
+        # Handle specific constraint violations
+        if "UNIQUE constraint failed: inventory_items.part_number" in str(e):
+            raise HTTPException(status_code=400, detail=f"Part number '{item.part_number}' already exists. Please use a unique part number.")
+        else:
+            # Re-raise other errors with more context
+            raise HTTPException(status_code=400, detail=f"Error creating inventory item: {str(e)}")
+    
     session.refresh(item)
     return item
 
@@ -669,16 +965,16 @@ def update_inventory_item(
     if not db_item:
         raise HTTPException(status_code=404, detail="Inventory item not found")
     
+    # Convert date strings to Python datetime objects
+    item_update = convert_inventory_item_dates(item_update)
+    
     item_data = item_update.dict(exclude_unset=True)
     item_data["updated_at"] = datetime.utcnow()
     
-    # Skip datetime fields that come as strings - they're already in the DB
+    # Update item fields
     for key, value in item_data.items():
-        if key not in ['created_at', 'updated_at'] or not isinstance(value, str):
+        if key not in ['created_at'] and hasattr(db_item, key):
             setattr(db_item, key, value)
-    
-    # Ensure updated_at is a datetime object
-    db_item.updated_at = datetime.utcnow()
     
     session.add(db_item)
     session.commit()
