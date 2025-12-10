@@ -6,6 +6,10 @@ from datetime import datetime, date, timedelta
 from enum import Enum
 import csv
 import io
+from typing import Optional, List
+from datetime import datetime, date, timedelta
+from enum import Enum
+import pandas as pd
 
 # Import export service
 from export_service import (
@@ -431,6 +435,12 @@ def read_root():
 # ============================================
 @app.post("/locations", response_model=Location)
 def create_location(location: Location, session: Session = Depends(get_session)):
+     # Validate parent_id exists if provided
+    if location.parent_id:
+        parent = session.get(Location, location.parent_id)
+        if not parent:
+            raise HTTPException(status_code=404, detail="Parent location not found")
+    
     session.add(location)
     session.commit()
     session.refresh(location)
@@ -439,23 +449,91 @@ def create_location(location: Location, session: Session = Depends(get_session))
 
 @app.get("/locations", response_model=List[Location])
 def get_locations(
-    name: Optional[str] = None,
-    company_code: Optional[str] = None,
-    plant_code: Optional[str] = None,
+    parent_id: Optional[int] = Query(None, description="Filter by parent location ID. Use 0 for root locations."),
     session: Session = Depends(get_session)
 ):
-    query = select(Location)
-    
-    if name:
-        query = query.where(Location.name.contains(name))
-    if company_code:
-        query = query.where(Location.company_code == company_code)
-    if plant_code:
-        query = query.where(Location.plant_code == plant_code)
-    
-    locations = session.exec(query).all()
+    """Get all locations, optionally filtered by parent_id"""
+    if parent_id == 0:
+        # Get root locations (no parent)
+        locations = session.exec(select(Location).where(Location.parent_id == None)).all()
+    elif parent_id is not None:
+        # Get sub-locations of a specific parent
+        locations = session.exec(select(Location).where(Location.parent_id == parent_id)).all()
+    else:
+        # Get all locations
+        locations = session.exec(select(Location)).all()
     return locations
+@app.get("/locations/{location_id}", response_model=Location)
+def get_location(location_id: int, session: Session = Depends(get_session)):
+    """Get a specific location by ID"""
+    location = session.get(Location, location_id)
+    if not location:
+        raise HTTPException(status_code=404, detail="Location not found")
+    return location
 
+
+@app.get("/locations/{location_id}/sublocations", response_model=List[Location])
+def get_sublocations(location_id: int, session: Session = Depends(get_session)):
+    """Get all sub-locations for a specific parent location"""
+    parent = session.get(Location, location_id)
+    if not parent:
+        raise HTTPException(status_code=404, detail="Parent location not found")
+    
+    sublocations = session.exec(select(Location).where(Location.parent_id == location_id)).all()
+    return sublocations
+
+
+@app.put("/locations/{location_id}", response_model=Location)
+def update_location(location_id: int, location_update: Location, session: Session = Depends(get_session)):
+    """Update a location"""
+    location = session.get(Location, location_id)
+    if not location:
+        raise HTTPException(status_code=404, detail="Location not found")
+    
+    # Validate parent_id if being updated
+    if location_update.parent_id:
+        if location_update.parent_id == location_id:
+            raise HTTPException(status_code=400, detail="Location cannot be its own parent")
+        parent = session.get(Location, location_update.parent_id)
+        if not parent:
+            raise HTTPException(status_code=404, detail="Parent location not found")
+    
+    location_data = location_update.dict(exclude_unset=True, exclude={'id'})
+    for key, value in location_data.items():
+        setattr(location, key, value)
+    
+    session.add(location)
+    session.commit()
+    session.refresh(location)
+    return location
+
+
+@app.delete("/locations/{location_id}")
+def delete_location(location_id: int, session: Session = Depends(get_session)):
+    """Delete a location"""
+    location = session.get(Location, location_id)
+    if not location:
+        raise HTTPException(status_code=404, detail="Location not found")
+    
+    # Check if location has sub-locations
+    sublocations = session.exec(select(Location).where(Location.parent_id == location_id)).all()
+    if sublocations:
+        raise HTTPException(
+            status_code=400, 
+            detail=f"Cannot delete location with {len(sublocations)} sub-location(s). Delete sub-locations first."
+        )
+    
+    # Check if location has assets
+    assets = session.exec(select(Asset).where(Asset.location_id == location_id)).all()
+    if assets:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot delete location with {len(assets)} asset(s). Reassign assets first."
+        )
+    
+    session.delete(location)
+    session.commit()
+    return {"message": "Location deleted successfully"}
 
 # ============================================
 # VENDOR ENDPOINTS
@@ -1050,54 +1128,95 @@ def remove_spare_part_from_asset(
 @app.post("/assets/bulk-import")
 async def bulk_import_assets(file: UploadFile = File(...), session: Session = Depends(get_session)):
     """
-    Bulk import assets from CSV file.
-    Expected columns: asset_id, name, category, location_id, status, owner_cost_center, 
+    Bulk import assets from CSV, XLS, or XLSX file.
+            Expected columns: asset_id, name, category, location_id, status, owner_cost_center, 
                      vendor, serial_number, tag_id, purchase_date, warranty_expiry
     """
-    if not file.filename.endswith('.csv'):
-        raise HTTPException(status_code=400, detail="File must be a CSV")
+    # Check file extension
+    file_ext = file.filename.lower().split('.')[-1]
+    if file_ext not in ['csv', 'xls', 'xlsx']:
+        raise HTTPException(status_code=400, detail="File must be CSV, XLS, or XLSX")
+
     
     contents = await file.read()
-    csv_data = io.StringIO(contents.decode('utf-8'))
-    csv_reader = csv.DictReader(csv_data)
+    c# Parse file based on extension
+    try:
+        if file_ext == 'csv':
+            csv_data = io.StringIO(contents.decode('utf-8'))
+            df = pd.read_csv(csv_data)
+        else:  # xls or xlsx
+            df = pd.read_excel(io.BytesIO(contents), engine='openpyxl' if file_ext == 'xlsx' else None)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Failed to parse file: {str(e)}")
     
+    # Replace NaN with None for proper handling
+    df = df.where(pd.notnull(df), None)
+
     imported_count = 0
     errors = []
     
-    for row_num, row in enumerate(csv_reader, start=2):
+    for row_num, (_, row) in enumerate(df.iterrows(), start=2):
         try:
+            # Helper function to safely get values and handle NaN
+            def safe_get(key, default=None):
+                val = row.get(key, default)
+                # Check for NaN (pandas returns float NaN for empty cells)
+                if val is None or (isinstance(val, float) and pd.isna(val)):
+                    return default
+                # Convert empty strings to default
+                if isinstance(val, str) and val.strip() == '':
+                    return default
+                return val
+            
+            def safe_int(key, default=None):
+                val = safe_get(key)
+                if val is None:
+                    return default
+                try:
+                    return int(float(val))  # Convert through float first to handle strings like "1.0"
+                except (ValueError, TypeError):
+                    return default
+            
+            def safe_float(key, default=None):
+                val = safe_get(key)
+                if val is None:
+                    return default
+                try:
+                    return float(val)
+                except (ValueError, TypeError):
+                    return default
             # Parse dates if present using helper function
-            purchase_date = parse_date_string(row.get('purchase_date'))
-            warranty_expiry = parse_date_string(row.get('warranty_expiry'))
-            invoice_date = parse_date_string(row.get('invoice_date'))
-            capitalised_on = parse_date_string(row.get('capitalised_on'))
-            warranty_date = parse_date_string(row.get('warranty_date'))
+            purchase_date = parse_date_string(safe_get('purchase_date'))
+            warranty_expiry = parse_date_string(safe_get('warranty_expiry'))
+            invoice_date = parse_date_string(safe_get('invoice_date'))
+            capitalised_on = parse_date_string(safe_get('capitalised_on'))
+            warranty_date = parse_date_string(safe_get('warranty_date'))
             
             asset = Asset(
-                asset_id=row['asset_id'],
-                name=row['name'],
-                category=row['category'],
-                status=row.get('status', AssetStatus.ACTIVE),
-                location_id=int(row['location_id']) if row.get('location_id') else None,
-                station_id=int(row['station_id']) if row.get('station_id') else None,
-                owner_cost_center=row.get('owner_cost_center'),
-                vendor_name=row.get('vendor'),  # Use vendor_name instead of vendor
-                vendor_id=int(row['vendor_id']) if row.get('vendor_id') else None,
-                serial_number=row.get('serial_number'),
-                tag_id=row.get('tag_id'),
-                sap_id=row.get('sap_id'),
+                asset_id=str(safe_get('asset_id', '')),
+                name=str(safe_get('name', '')),
+                category=str(safe_get('category', '')),
+                status=safe_get('status', AssetStatus.ACTIVE),
+                location_id=safe_int('location_id'),
+                station_id=safe_int('station_id'),
+                owner_cost_center=safe_get('owner_cost_center'),
+                vendor_name=safe_get('vendor'),  # Use vendor_name instead of vendor
+                vendor_id=safe_int('vendor_id'),
+                serial_number=safe_get('serial_number'),
+                tag_id=safe_get('tag_id'),
+                sap_id=safe_get('sap_id'),
                 purchase_date=purchase_date,
                 warranty_expiry=warranty_expiry,
                 warranty_date=warranty_date,
                 invoice_date=invoice_date,
                 capitalised_on=capitalised_on,
-                invoice_number=row.get('invoice_number'),
-                purchase_cost=float(row['purchase_cost']) if row.get('purchase_cost') else None,
-                company_code=row.get('company_code', 'IN07'),
-                plant_code=row.get('plant_code', 'IN08'),
-                currency=row.get('currency', 'INR'),
-                location_name=row.get('location_name', 'Plant - Bangalore'),
-                state=row.get('state'),
+                invoice_number=safe_get('invoice_number'),
+                purchase_cost=safe_float('purchase_cost'),
+                company_code=safe_get('company_code', 'IN07'),
+                plant_code=safe_get('plant_code', 'IN08'),
+                currency=safe_get('currency', 'INR'),
+                location_name=safe_get('location_name', 'Plant - Bangalore'),
+                state=safe_get('state'),
                 created_at=datetime.utcnow(),
                 updated_at=datetime.utcnow()
             )
@@ -1206,6 +1325,136 @@ def get_work_order(wo_id: int, session: Session = Depends(get_session)):
     wo = session.get(WorkOrder, wo_id)
     if not wo:
         raise HTTPException(status_code=404, detail="Work Order not found")
+    return wo
+
+@app.put("/work-orders/{wo_id}", response_model=WorkOrder)
+def update_work_order(wo_id: int, wo_update: WorkOrder, session: Session = Depends(get_session)):
+    """Update a work order"""
+    db_wo = session.get(WorkOrder, wo_id)
+    if not db_wo:
+        raise HTTPException(status_code=404, detail="Work Order not found")
+    
+    # Store old status to check for transitions
+    old_status = db_wo.status
+    
+    # Get update data, excluding unset fields
+    wo_data = wo_update.dict(exclude_unset=True)
+    
+    # Update work order fields
+    for key, value in wo_data.items():
+        if key not in ['id', 'wo_number', 'created_at'] and hasattr(db_wo, key):
+            setattr(db_wo, key, value)
+    
+    # Handle status transitions
+    if 'status' in wo_data:
+        new_status = wo_data['status']
+        
+        # Setting timestamps
+        if new_status == WorkOrderStatus.IN_PROGRESS and not db_wo.started_at:
+            db_wo.started_at = datetime.utcnow()
+        elif new_status == WorkOrderStatus.COMPLETED and not db_wo.completed_at:
+            db_wo.completed_at = datetime.utcnow()
+        
+        # Handle inventory restoration when reverting from COMPLETED
+        if old_status == WorkOrderStatus.COMPLETED and new_status in [WorkOrderStatus.IN_PROGRESS, WorkOrderStatus.OPEN]:
+            # Restore all spare parts to inventory
+            parts = session.exec(
+                select(WorkOrderPart).where(WorkOrderPart.work_order_id == wo_id)
+            ).all()
+            
+            for part in parts:
+                item = session.get(InventoryItem, part.inventory_item_id)
+                if item:
+                    item.stock_on_hand += part.quantity_used
+                    item.updated_at = datetime.utcnow()
+                    session.add(item)
+        
+        # Deduct inventory again when changing back to COMPLETED
+        elif old_status in [WorkOrderStatus.OPEN, WorkOrderStatus.IN_PROGRESS] and new_status == WorkOrderStatus.COMPLETED:
+            # Deduct all spare parts from inventory
+            parts = session.exec(
+                select(WorkOrderPart).where(WorkOrderPart.work_order_id == wo_id)
+            ).all()
+            
+            for part in parts:
+                item = session.get(InventoryItem, part.inventory_item_id)
+                if item:
+                    if item.stock_on_hand < part.quantity_used:
+                        session.rollback()
+                        raise HTTPException(
+                            status_code=400, 
+                            detail=f"Insufficient stock for {item.item_name}. Required: {part.quantity_used}, Available: {item.stock_on_hand}"
+                        )
+                    item.stock_on_hand -= part.quantity_used
+                    item.updated_at = datetime.utcnow()
+                    session.add(item)
+    
+    session.add(db_wo)
+    
+    try:
+        session.commit()
+    except Exception as e:
+        session.rollback()
+        raise HTTPException(status_code=400, detail=f"Error updating work order: {str(e)}")
+    
+    session.refresh(db_wo)
+    return db_wo
+
+@app.patch("/work-orders/{wo_id}/start")
+def start_work_order(wo_id: int, session: Session = Depends(get_session)):
+    """Start a work order - sets status to IN_PROGRESS and records start time"""
+    wo = session.get(WorkOrder, wo_id)
+    if not wo:
+        raise HTTPException(status_code=404, detail="Work Order not found")
+    
+    wo.status = WorkOrderStatus.IN_PROGRESS
+    if not wo.started_at:
+        wo.started_at = datetime.utcnow()
+    
+    session.add(wo)
+    session.commit()
+    session.refresh(wo)
+    return wo
+
+
+@app.patch("/work-orders/{wo_id}/complete")
+def complete_work_order(
+    wo_id: int,
+    completion_notes: Optional[str] = None,
+    time_spent_hours: Optional[float] = None,
+    session: Session = Depends(get_session)
+):
+    """Complete a work order - sets status to COMPLETED and records completion time"""
+    wo = session.get(WorkOrder, wo_id)
+    if not wo:
+        raise HTTPException(status_code=404, detail="Work Order not found")
+    
+    wo.status = WorkOrderStatus.COMPLETED
+    wo.completed_at = datetime.utcnow()
+    
+    if completion_notes:
+        wo.completion_notes = completion_notes
+    if time_spent_hours:
+        wo.time_spent_hours = time_spent_hours
+    
+    session.add(wo)
+    session.commit()
+    session.refresh(wo)
+    return wo
+
+
+@app.patch("/work-orders/{wo_id}/cancel")
+def cancel_work_order(wo_id: int, session: Session = Depends(get_session)):
+    """Cancel a work order - sets status to CANCELLED"""
+    wo = session.get(WorkOrder, wo_id)
+    if not wo:
+        raise HTTPException(status_code=404, detail="Work Order not found")
+    
+    wo.status = WorkOrderStatus.CANCELLED
+    
+    session.add(wo)
+    session.commit()
+    session.refresh(wo)
     return wo
 
 
@@ -1868,11 +2117,10 @@ def add_parts_to_work_order(
     )
     session.add(usage)
     
-    # Deduct from inventory (only when WO is completed)
-    if wo.status == WorkOrderStatus.COMPLETED:
-        item.stock_on_hand -= quantity
-        item.updated_at = datetime.utcnow()
-        session.add(item)
+    # Deduct from inventory immediately when part is added
+    item.stock_on_hand -= quantity
+    item.updated_at = datetime.utcnow()
+    session.add(item)
     
     session.commit()
     return {"message": "Spare parts added to work order", "remaining_stock": item.stock_on_hand}
@@ -1889,6 +2137,7 @@ def get_work_order_parts(wo_id: int, session: Session = Depends(get_session)):
     for part in parts:
         item = session.get(InventoryItem, part.inventory_item_id)
         result.append({
+            "id": part.id,
             "part_number": item.part_number,
             "item_name": item.item_name,
             "quantity_used": part.quantity_used,
@@ -1897,6 +2146,27 @@ def get_work_order_parts(wo_id: int, session: Session = Depends(get_session)):
         })
     
     return result
+
+@app.delete("/work-orders/{wo_id}/parts/{part_id}")
+def delete_work_order_part(wo_id: int, part_id: int, session: Session = Depends(get_session)):
+    """Delete a spare part from a work order and restore inventory"""
+    part = session.get(WorkOrderPart, part_id)
+    
+    if not part or part.work_order_id != wo_id:
+        raise HTTPException(status_code=404, detail="Part not found in this work order")
+    
+    # Get the inventory item to restore stock
+    item = session.get(InventoryItem, part.inventory_item_id)
+    if item:
+        # Always restore inventory when deleting a part since stock was deducted when added
+        item.stock_on_hand += part.quantity_used
+        item.updated_at = datetime.utcnow()
+        session.add(item)
+    
+    session.delete(part)
+    session.commit()
+    return {"message": "Spare part removed from work order"}
+
 
 
 # ============================================
