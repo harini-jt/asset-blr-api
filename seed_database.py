@@ -139,6 +139,7 @@ def create_assets(locations, vendors):
             "category": "Pumps",
             "status": "Active",
             "location_id": locations[0]["id"],
+            "station_id": locations[1]["id"],
             "owner_cost_center": "PROD-001",
             "vendor_id": vendors[0]["id"],  # Acme Industrial Solutions
             "vendor_name": vendors[0]["name"],
@@ -164,6 +165,7 @@ def create_assets(locations, vendors):
             "category": "Conveyors",
             "status": "Active",
             "location_id": locations[0]["id"],
+            "station_id": locations[2]["id"],
             "owner_cost_center": "PROD-002",
             "vendor_id": vendors[1]["id"],  # BeltCo Manufacturing
             "vendor_name": vendors[1]["name"],

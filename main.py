@@ -64,6 +64,18 @@ class PMFrequencyUnit(str, Enum):
     MONTHS = "Months"
 
 
+class InventoryStatus(str, Enum):
+    ACTIVE = "Active"
+    INACTIVE = "Inactive"
+
+
+class InventoryState(str, Enum):
+    ACTIVE = "Active"
+    INACTIVE_SCRAP = "In-Active & Scrap"
+    NOT_IN_USE_TO_BE_SCRAPPED = "Not in Use - To be Scrapped"
+    IN_USE = "In Use"
+
+
 # ============================================
 # Models - Vendor
 # ============================================
@@ -95,7 +107,10 @@ class Location(SQLModel, table=True):
     parent_id: Optional[int] = Field(default=None, foreign_key="locations.id")
     
     # Relationships
-    assets: List["Asset"] = Relationship(back_populates="location_rel")
+    assets: List["Asset"] = Relationship(
+        back_populates="location_rel",
+        sa_relationship_kwargs={"foreign_keys": "Asset.location_id"}
+    )
     
 
 # ============================================
@@ -112,6 +127,7 @@ class Asset(SQLModel, table=True):
     
     # Location & Ownership
     location_id: Optional[int] = Field(default=None, foreign_key="locations.id")
+    station_id: Optional[int] = Field(default=None, foreign_key="locations.id")
     owner_cost_center: Optional[str] = None
     
     # Vendor & Identification
@@ -144,7 +160,10 @@ class Asset(SQLModel, table=True):
     updated_at: datetime = Field(default_factory=datetime.utcnow)
     
     # Relationships
-    location_rel: Optional[Location] = Relationship(back_populates="assets")
+    location_rel: Optional[Location] = Relationship(
+        back_populates="assets",
+        sa_relationship_kwargs={"foreign_keys": "[Asset.location_id]"}
+    )
     vendor_rel: Optional[Vendor] = Relationship(back_populates="assets")
     work_orders: List["WorkOrderAsset"] = Relationship(back_populates="asset")
     pm_templates: List["PMTemplate"] = Relationship(back_populates="asset")
@@ -252,14 +271,37 @@ class InventoryItem(SQLModel, table=True):
     min_stock: int = Field(default=0)
     max_stock: int = Field(default=100)
     
-    # Costing
+    # Costing & Financial
     unit_cost: Optional[float] = None
+    book_value: Optional[float] = None
+    invoice_number: Optional[str] = None
+    invoice_date: Optional[date] = None
+    capitalised_on: Optional[date] = None
+    
+    # Organization
+    company_code: Optional[str] = Field(default="IN06")
+    plant_code: Optional[str] = Field(default="IN08")
+    currency: Optional[str] = Field(default="INR")
+    cost_center: Optional[str] = None
+    
+    # Location & Vendor
+    location_id: Optional[int] = Field(default=None, foreign_key="locations.id")
+    vendor_id: Optional[int] = Field(default=None, foreign_key="vendors.id")
+    
+    # Status & State
+    status: InventoryStatus = Field(default=InventoryStatus.ACTIVE)
+    state: Optional[InventoryState] = None
+    remarks: Optional[str] = None
     
     # Tracking
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
     
     # Relationships
+    location_rel: Optional[Location] = Relationship(
+        sa_relationship_kwargs={"foreign_keys": "[InventoryItem.location_id]"}
+    )
+    vendor_rel: Optional[Vendor] = Relationship()
     work_order_usage: List["WorkOrderPart"] = Relationship(back_populates="inventory_item")
     asset_usage: List["AssetSparePart"] = Relationship(back_populates="inventory_item")
 
@@ -804,6 +846,7 @@ async def bulk_import_assets(file: UploadFile = File(...), session: Session = De
                 category=row['category'],
                 status=row.get('status', AssetStatus.ACTIVE),
                 location_id=int(row['location_id']) if row.get('location_id') else None,
+                station_id=int(row['station_id']) if row.get('station_id') else None,
                 owner_cost_center=row.get('owner_cost_center'),
                 vendor_name=row.get('vendor'),  # Use vendor_name instead of vendor
                 vendor_id=int(row['vendor_id']) if row.get('vendor_id') else None,
