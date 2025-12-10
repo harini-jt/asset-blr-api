@@ -6,11 +6,20 @@ from datetime import datetime, date, timedelta
 from enum import Enum
 import csv
 import io
-from typing import Optional, List
-from datetime import datetime, date, timedelta
-from enum import Enum
-import csv
-import io
+
+# Import export service
+from export_service import (
+    export_work_orders_csv,
+    export_assets_csv,
+    export_inventory_csv,
+    export_locations_csv,
+    export_vendors_csv,
+    export_work_orders_excel,
+    export_assets_excel,
+    export_inventory_excel,
+    export_locations_excel,
+    export_vendors_excel
+)
 
 # ============================================
 # Database Setup
@@ -429,8 +438,22 @@ def create_location(location: Location, session: Session = Depends(get_session))
 
 
 @app.get("/locations", response_model=List[Location])
-def get_locations(session: Session = Depends(get_session)):
-    locations = session.exec(select(Location)).all()
+def get_locations(
+    name: Optional[str] = None,
+    company_code: Optional[str] = None,
+    plant_code: Optional[str] = None,
+    session: Session = Depends(get_session)
+):
+    query = select(Location)
+    
+    if name:
+        query = query.where(Location.name.contains(name))
+    if company_code:
+        query = query.where(Location.company_code == company_code)
+    if plant_code:
+        query = query.where(Location.plant_code == plant_code)
+    
+    locations = session.exec(query).all()
     return locations
 
 
@@ -463,8 +486,22 @@ def create_vendor(vendor: Vendor, session: Session = Depends(get_session)):
 
 
 @app.get("/vendors", response_model=List[Vendor])
-def get_vendors(session: Session = Depends(get_session)):
-    vendors = session.exec(select(Vendor)).all()
+def get_vendors(
+    name: Optional[str] = None,
+    contact_person: Optional[str] = None,
+    email: Optional[str] = None,
+    session: Session = Depends(get_session)
+):
+    query = select(Vendor)
+    
+    if name:
+        query = query.where(Vendor.name.contains(name))
+    if contact_person:
+        query = query.where(Vendor.contact_person.contains(contact_person))
+    if email:
+        query = query.where(Vendor.email.contains(email))
+    
+    vendors = session.exec(query).all()
     return vendors
 
 
@@ -750,20 +787,35 @@ def create_asset(asset: Asset, session: Session = Depends(get_session)):
 
 @app.get("/assets", response_model=List[Asset])
 def get_assets(
+    asset_id: Optional[str] = None,
+    name: Optional[str] = None,
     status: Optional[AssetStatus] = None,
     category: Optional[str] = None,
     location_id: Optional[int] = None,
+    parent_asset_id: Optional[int] = None,
+    serial_number: Optional[str] = None,
     search: Optional[str] = None,
     session: Session = Depends(get_session)
 ):
     query = select(Asset)
     
+    # Specific field filters (exact or partial match)
+    if asset_id:
+        query = query.where(Asset.asset_id.contains(asset_id))
+    if name:
+        query = query.where(Asset.name.contains(name))
+    if serial_number:
+        query = query.where(Asset.serial_number.contains(serial_number))
     if status:
         query = query.where(Asset.status == status)
     if category:
         query = query.where(Asset.category == category)
     if location_id:
         query = query.where(Asset.location_id == location_id)
+    if parent_asset_id:
+        query = query.where(Asset.parent_asset_id == parent_asset_id)
+    
+    # General search (fallback for quick search)
     if search:
         query = query.where(
             or_(
@@ -1091,19 +1143,59 @@ def create_work_order(
 
 @app.get("/work-orders", response_model=List[WorkOrder])
 def get_work_orders(
+    summary: Optional[str] = None,
+    description: Optional[str] = None,
     status: Optional[WorkOrderStatus] = None,
     priority: Optional[WorkOrderPriority] = None,
     technician: Optional[str] = None,
+    asset_id: Optional[int] = None,
+    due_date_preset: Optional[str] = None,  # next_week, next_month, overdue
+    due_date_from: Optional[str] = None,  # Custom date range start (YYYY-MM-DD)
+    due_date_to: Optional[str] = None,    # Custom date range end (YYYY-MM-DD)
     session: Session = Depends(get_session)
 ):
+    from datetime import timedelta
+    
     query = select(WorkOrder)
     
+    if summary:
+        query = query.where(WorkOrder.summary.contains(summary))
+    if description:
+        query = query.where(WorkOrder.description.contains(description))
     if status:
         query = query.where(WorkOrder.status == status)
     if priority:
         query = query.where(WorkOrder.priority == priority)
     if technician:
-        query = query.where(WorkOrder.technician == technician)
+        query = query.where(WorkOrder.technician.contains(technician))
+    if asset_id:
+        # Filter work orders that have this asset
+        subquery = select(WorkOrderAsset.work_order_id).where(WorkOrderAsset.asset_id == asset_id)
+        query = query.where(WorkOrder.id.in_(subquery))
+    
+    # Date filtering
+    if due_date_preset:
+        now = datetime.utcnow()
+        if due_date_preset == "next_week":
+            start_date = now
+            end_date = now + timedelta(days=7)
+            query = query.where(WorkOrder.due_date >= start_date, WorkOrder.due_date <= end_date)
+        elif due_date_preset == "next_month":
+            start_date = now
+            end_date = now + timedelta(days=30)
+            query = query.where(WorkOrder.due_date >= start_date, WorkOrder.due_date <= end_date)
+        elif due_date_preset == "overdue":
+            query = query.where(WorkOrder.due_date < now, WorkOrder.status != WorkOrderStatus.COMPLETED)
+    elif due_date_from or due_date_to:
+        # Custom date range
+        if due_date_from:
+            from_date = datetime.strptime(due_date_from, "%Y-%m-%d")
+            query = query.where(WorkOrder.due_date >= from_date)
+        if due_date_to:
+            to_date = datetime.strptime(due_date_to, "%Y-%m-%d")
+            # Add 1 day to include the entire end date
+            to_date = to_date + timedelta(days=1)
+            query = query.where(WorkOrder.due_date < to_date)
     
     work_orders = session.exec(query).all()
     return work_orders
@@ -1187,6 +1279,334 @@ def get_work_order_assets(wo_id: int, session: Session = Depends(get_session)):
     asset_ids = [link.asset_id for link in links]
     assets = session.exec(select(Asset).where(Asset.id.in_(asset_ids))).all()
     return assets
+
+
+# ============================================
+# EXPORT ENDPOINTS
+# ============================================
+
+@app.get("/work-orders/export/csv")
+def export_work_orders_to_csv(
+    summary: Optional[str] = None,
+    description: Optional[str] = None,
+    status: Optional[WorkOrderStatus] = None,
+    priority: Optional[WorkOrderPriority] = None,
+    technician: Optional[str] = None,
+    asset_id: Optional[int] = None,
+    due_date_preset: Optional[str] = None,
+    due_date_from: Optional[str] = None,
+    due_date_to: Optional[str] = None,
+    session: Session = Depends(get_session)
+):
+    """Export filtered work orders to CSV"""
+    from datetime import timedelta
+    
+    query = select(WorkOrder)
+    
+    # Apply same filters as get_work_orders
+    if summary:
+        query = query.where(WorkOrder.summary.contains(summary))
+    if description:
+        query = query.where(WorkOrder.description.contains(description))
+    if status:
+        query = query.where(WorkOrder.status == status)
+    if priority:
+        query = query.where(WorkOrder.priority == priority)
+    if technician:
+        query = query.where(WorkOrder.technician.contains(technician))
+    if asset_id:
+        subquery = select(WorkOrderAsset.work_order_id).where(WorkOrderAsset.asset_id == asset_id)
+        query = query.where(WorkOrder.id.in_(subquery))
+    
+    # Date filtering
+    if due_date_preset:
+        now = datetime.utcnow()
+        if due_date_preset == "next_week":
+            start_date = now
+            end_date = now + timedelta(days=7)
+            query = query.where(WorkOrder.due_date >= start_date, WorkOrder.due_date <= end_date)
+        elif due_date_preset == "next_month":
+            start_date = now
+            end_date = now + timedelta(days=30)
+            query = query.where(WorkOrder.due_date >= start_date, WorkOrder.due_date <= end_date)
+        elif due_date_preset == "overdue":
+            query = query.where(WorkOrder.due_date < now, WorkOrder.status != WorkOrderStatus.COMPLETED)
+    elif due_date_from or due_date_to:
+        if due_date_from:
+            from_date = datetime.strptime(due_date_from, "%Y-%m-%d")
+            query = query.where(WorkOrder.due_date >= from_date)
+        if due_date_to:
+            to_date = datetime.strptime(due_date_to, "%Y-%m-%d")
+            to_date = to_date + timedelta(days=1)
+            query = query.where(WorkOrder.due_date < to_date)
+    
+    work_orders = session.exec(query).all()
+    return export_work_orders_csv(work_orders)
+
+
+@app.get("/assets/export/csv")
+def export_assets_to_csv(
+    asset_id: Optional[str] = None,
+    name: Optional[str] = None,
+    status: Optional[AssetStatus] = None,
+    category: Optional[str] = None,
+    location_id: Optional[int] = None,
+    parent_asset_id: Optional[int] = None,
+    serial_number: Optional[str] = None,
+    session: Session = Depends(get_session)
+):
+    """Export filtered assets to CSV"""
+    query = select(Asset)
+    
+    # Apply same filters as get_assets
+    if asset_id:
+        query = query.where(Asset.asset_id.contains(asset_id))
+    if name:
+        query = query.where(Asset.name.contains(name))
+    if status:
+        query = query.where(Asset.status == status)
+    if category:
+        query = query.where(Asset.category == category)
+    if location_id:
+        query = query.where(Asset.location_id == location_id)
+    if parent_asset_id:
+        query = query.where(Asset.parent_asset_id == parent_asset_id)
+    if serial_number:
+        query = query.where(Asset.serial_number.contains(serial_number))
+    
+    assets = session.exec(query).all()
+    return export_assets_csv(assets)
+
+
+@app.get("/inventory/export/csv")
+def export_inventory_to_csv(
+    item_name: Optional[str] = None,
+    part_number: Optional[str] = None,
+    status: Optional[InventoryStatus] = None,
+    location_id: Optional[int] = None,
+    vendor_id: Optional[int] = None,
+    low_stock: Optional[bool] = None,
+    session: Session = Depends(get_session)
+):
+    """Export filtered inventory items to CSV"""
+    query = select(InventoryItem)
+    
+    # Apply same filters as get_inventory
+    if item_name:
+        query = query.where(InventoryItem.item_name.contains(item_name))
+    if part_number:
+        query = query.where(InventoryItem.part_number.contains(part_number))
+    if status:
+        query = query.where(InventoryItem.status == status)
+    if location_id:
+        query = query.where(InventoryItem.location_id == location_id)
+    if vendor_id:
+        query = query.where(InventoryItem.vendor_id == vendor_id)
+    if low_stock:
+        query = query.where(InventoryItem.quantity <= InventoryItem.min_stock_level)
+    
+    items = session.exec(query).all()
+    return export_inventory_csv(items)
+
+
+@app.get("/locations/export/csv")
+def export_locations_to_csv(
+    name: Optional[str] = None,
+    session: Session = Depends(get_session)
+):
+    """Export filtered locations to CSV"""
+    query = select(Location)
+    
+    if name:
+        query = query.where(Location.name.contains(name))
+    
+    locations = session.exec(query).all()
+    return export_locations_csv(locations)
+
+
+@app.get("/vendors/export/csv")
+def export_vendors_to_csv(
+    name: Optional[str] = None,
+    contact_person: Optional[str] = None,
+    email: Optional[str] = None,
+    session: Session = Depends(get_session)
+):
+    """Export filtered vendors to CSV"""
+    query = select(Vendor)
+    
+    if name:
+        query = query.where(Vendor.name.contains(name))
+    if contact_person:
+        query = query.where(Vendor.contact_person.contains(contact_person))
+    if email:
+        query = query.where(Vendor.email.contains(email))
+    
+    vendors = session.exec(query).all()
+    return export_vendors_csv(vendors)
+
+
+# ============================================
+# EXCEL EXPORT ENDPOINTS
+# ============================================
+
+@app.get("/work-orders/export/excel")
+def export_work_orders_to_excel(
+    summary: Optional[str] = None,
+    description: Optional[str] = None,
+    status: Optional[WorkOrderStatus] = None,
+    priority: Optional[WorkOrderPriority] = None,
+    technician: Optional[str] = None,
+    asset_id: Optional[int] = None,
+    due_date_preset: Optional[str] = None,
+    due_date_from: Optional[str] = None,
+    due_date_to: Optional[str] = None,
+    session: Session = Depends(get_session)
+):
+    """Export filtered work orders to Excel"""
+    from datetime import timedelta
+    
+    query = select(WorkOrder)
+    
+    # Apply same filters as get_work_orders
+    if summary:
+        query = query.where(WorkOrder.summary.contains(summary))
+    if description:
+        query = query.where(WorkOrder.description.contains(description))
+    if status:
+        query = query.where(WorkOrder.status == status)
+    if priority:
+        query = query.where(WorkOrder.priority == priority)
+    if technician:
+        query = query.where(WorkOrder.technician.contains(technician))
+    if asset_id:
+        subquery = select(WorkOrderAsset.work_order_id).where(WorkOrderAsset.asset_id == asset_id)
+        query = query.where(WorkOrder.id.in_(subquery))
+    
+    # Date filtering
+    if due_date_preset:
+        now = datetime.utcnow()
+        if due_date_preset == "next_week":
+            start_date = now
+            end_date = now + timedelta(days=7)
+            query = query.where(WorkOrder.due_date >= start_date, WorkOrder.due_date <= end_date)
+        elif due_date_preset == "next_month":
+            start_date = now
+            end_date = now + timedelta(days=30)
+            query = query.where(WorkOrder.due_date >= start_date, WorkOrder.due_date <= end_date)
+        elif due_date_preset == "overdue":
+            query = query.where(WorkOrder.due_date < now, WorkOrder.status != WorkOrderStatus.COMPLETED)
+    elif due_date_from or due_date_to:
+        if due_date_from:
+            from_date = datetime.strptime(due_date_from, "%Y-%m-%d")
+            query = query.where(WorkOrder.due_date >= from_date)
+        if due_date_to:
+            to_date = datetime.strptime(due_date_to, "%Y-%m-%d")
+            to_date = to_date + timedelta(days=1)
+            query = query.where(WorkOrder.due_date < to_date)
+    
+    work_orders = session.exec(query).all()
+    return export_work_orders_excel(work_orders)
+
+
+@app.get("/assets/export/excel")
+def export_assets_to_excel(
+    asset_id: Optional[str] = None,
+    name: Optional[str] = None,
+    status: Optional[AssetStatus] = None,
+    category: Optional[str] = None,
+    location_id: Optional[int] = None,
+    parent_asset_id: Optional[int] = None,
+    serial_number: Optional[str] = None,
+    session: Session = Depends(get_session)
+):
+    """Export filtered assets to Excel"""
+    query = select(Asset)
+    
+    # Apply same filters as get_assets
+    if asset_id:
+        query = query.where(Asset.asset_id.contains(asset_id))
+    if name:
+        query = query.where(Asset.name.contains(name))
+    if status:
+        query = query.where(Asset.status == status)
+    if category:
+        query = query.where(Asset.category == category)
+    if location_id:
+        query = query.where(Asset.location_id == location_id)
+    if parent_asset_id:
+        query = query.where(Asset.parent_asset_id == parent_asset_id)
+    if serial_number:
+        query = query.where(Asset.serial_number.contains(serial_number))
+    
+    assets = session.exec(query).all()
+    return export_assets_excel(assets)
+
+
+@app.get("/inventory/export/excel")
+def export_inventory_to_excel(
+    item_name: Optional[str] = None,
+    part_number: Optional[str] = None,
+    status: Optional[InventoryStatus] = None,
+    location_id: Optional[int] = None,
+    vendor_id: Optional[int] = None,
+    low_stock: Optional[bool] = None,
+    session: Session = Depends(get_session)
+):
+    """Export filtered inventory items to Excel"""
+    query = select(InventoryItem)
+    
+    # Apply same filters as get_inventory
+    if item_name:
+        query = query.where(InventoryItem.item_name.contains(item_name))
+    if part_number:
+        query = query.where(InventoryItem.part_number.contains(part_number))
+    if status:
+        query = query.where(InventoryItem.status == status)
+    if location_id:
+        query = query.where(InventoryItem.location_id == location_id)
+    if vendor_id:
+        query = query.where(InventoryItem.vendor_id == vendor_id)
+    if low_stock:
+        query = query.where(InventoryItem.quantity <= InventoryItem.min_stock_level)
+    
+    items = session.exec(query).all()
+    return export_inventory_excel(items)
+
+
+@app.get("/locations/export/excel")
+def export_locations_to_excel(
+    name: Optional[str] = None,
+    session: Session = Depends(get_session)
+):
+    """Export filtered locations to Excel"""
+    query = select(Location)
+    
+    if name:
+        query = query.where(Location.name.contains(name))
+    
+    locations = session.exec(query).all()
+    return export_locations_excel(locations)
+
+
+@app.get("/vendors/export/excel")
+def export_vendors_to_excel(
+    name: Optional[str] = None,
+    contact_person: Optional[str] = None,
+    email: Optional[str] = None,
+    session: Session = Depends(get_session)
+):
+    """Export filtered vendors to Excel"""
+    query = select(Vendor)
+    
+    if name:
+        query = query.where(Vendor.name.contains(name))
+    if contact_person:
+        query = query.where(Vendor.contact_person.contains(contact_person))
+    if email:
+        query = query.where(Vendor.email.contains(email))
+    
+    vendors = session.exec(query).all()
+    return export_vendors_excel(vendors)
 
 
 # ============================================
@@ -1316,11 +1736,27 @@ def create_inventory_item(item: InventoryItem, session: Session = Depends(get_se
 
 @app.get("/inventory", response_model=List[InventoryItem])
 def get_inventory_items(
+    item_name: Optional[str] = None,
+    part_number: Optional[str] = None,
+    status: Optional[str] = None,
+    location_id: Optional[int] = None,
+    vendor_id: Optional[int] = None,
     low_stock: bool = False,
     session: Session = Depends(get_session)
 ):
     query = select(InventoryItem)
     
+    # Specific field filters
+    if item_name:
+        query = query.where(InventoryItem.item_name.contains(item_name))
+    if part_number:
+        query = query.where(InventoryItem.part_number.contains(part_number))
+    if status:
+        query = query.where(InventoryItem.status == status)
+    if location_id:
+        query = query.where(InventoryItem.location_id == location_id)
+    if vendor_id:
+        query = query.where(InventoryItem.vendor_id == vendor_id)
     if low_stock:
         query = query.where(InventoryItem.stock_on_hand <= InventoryItem.min_stock)
     
@@ -1372,6 +1808,37 @@ def update_inventory_item(
     session.commit()
     session.refresh(db_item)
     return db_item
+
+
+@app.get("/inventory/{item_id}/where-used")
+def get_inventory_where_used(item_id: int, session: Session = Depends(get_session)):
+    """Get all assets that use this spare part (where-used information)"""
+    # Check if inventory item exists
+    item = session.get(InventoryItem, item_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="Spare part not found")
+    
+    # Get all asset-spare part relationships for this inventory item
+    asset_spare_parts = session.exec(
+        select(AssetSparePart).where(AssetSparePart.inventory_item_id == item_id)
+    ).all()
+    
+    # Enrich with asset details
+    result = []
+    for asp in asset_spare_parts:
+        asset = session.get(Asset, asp.asset_id)
+        if asset:
+            result.append({
+                "asset_id": asset.asset_id,
+                "asset_name": asset.name,
+                "description": asset.notes or asset.name,  # Use notes as description, fallback to name
+                "quantity": asp.quantity,
+                "asset_category": asset.category,
+                "asset_status": asset.status,
+                "notes": asp.notes
+            })
+    
+    return result
 
 
 @app.post("/work-orders/{wo_id}/parts")
