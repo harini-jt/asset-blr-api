@@ -89,6 +89,18 @@ class InventoryState(str, Enum):
     IN_USE = "In Use"
 
 
+class MaintenanceType(str, Enum):
+    PREVENTIVE = "Preventive"
+    CORRECTIVE = "Corrective"
+    PREDICTIVE = "Predictive"
+    BREAKDOWN = "Breakdown"
+
+
+class DoneBy(str, Enum):
+    INTERNAL = "Internal"
+    EXTERNAL = "External"
+
+
 # ============================================
 # Models - Vendor
 # ============================================
@@ -254,10 +266,16 @@ class PMTemplate(SQLModel, table=True):
     
     # Asset Link
     asset_id: int = Field(foreign_key="assets.id")
+    # Additional Fields for Enhanced PM Template
+    maintenance_type: MaintenanceType = Field(default=MaintenanceType.PREVENTIVE)
+    done_by: DoneBy = Field(default=DoneBy.INTERNAL)
+    vendor_name: Optional[str] = None  # For external maintenance
+    estimated_duration: Optional[float] = None  # in hours
+    schedule_on: Optional[date] = None  # Scheduled date for PM
     
     # Tracking
-    last_generated_date: Optional[datetime] = None
-    next_due_date: Optional[datetime] = None
+    last_generated_date: Optional[datetime] = None  # Acts as completed_on
+    next_due_date: Optional[datetime] = None  # Next scheduled date
     is_active: bool = Field(default=True)
     
     # Work Order Template
@@ -270,6 +288,25 @@ class PMTemplate(SQLModel, table=True):
     # Relationships
     asset: Asset = Relationship(back_populates="pm_templates")
     generated_work_orders: List[WorkOrder] = Relationship(back_populates="pm_template")
+    spare_parts: List["PMSparePart"] = Relationship(back_populates="pm_template")
+
+
+# ============================================
+# Models - PM Spare Parts Link Table
+# ============================================
+class PMSparePart(SQLModel, table=True):
+    __tablename__ = "pm_spare_parts"
+    
+    id: Optional[int] = Field(default=None, primary_key=True)
+    pm_template_id: int = Field(foreign_key="pm_templates.id")
+    inventory_item_id: int = Field(foreign_key="inventory_items.id")
+    quantity: int = Field(default=1)
+    notes: Optional[str] = None
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    
+    # Relationships
+    pm_template: PMTemplate = Relationship(back_populates="spare_parts")
+    inventory_item: "InventoryItem" = Relationship(back_populates="pm_usage")
 
 
 # ============================================
@@ -322,7 +359,7 @@ class InventoryItem(SQLModel, table=True):
     vendor_rel: Optional[Vendor] = Relationship()
     work_order_usage: List["WorkOrderPart"] = Relationship(back_populates="inventory_item")
     asset_usage: List["AssetSparePart"] = Relationship(back_populates="inventory_item")
-
+    pm_usage: List["PMSparePart"] = Relationship(back_populates="inventory_item")
 
 class WorkOrderPart(SQLModel, table=True):
     __tablename__ = "work_order_parts"
@@ -365,6 +402,72 @@ class AssetSparePartCreate(SQLModel):
 class AssetSparePartUpdate(SQLModel):
     quantity: Optional[int] = None
     notes: Optional[str] = None
+
+# ============================================
+# Request/Response Models for PM Templates
+# ============================================
+class SparePartLink(SQLModel):
+    inventory_item_id: int
+    quantity: int = 1
+    notes: Optional[str] = None
+
+
+class PMTemplateCreate(SQLModel):
+    name: str
+    description: Optional[str] = None
+    frequency_value: int
+    frequency_unit: PMFrequencyUnit = PMFrequencyUnit.DAYS
+    asset_id: int
+    maintenance_type: MaintenanceType = MaintenanceType.PREVENTIVE
+    done_by: DoneBy = DoneBy.INTERNAL
+    vendor_name: Optional[str] = None
+    estimated_duration: Optional[float] = None
+    schedule_on: Optional[date] = None
+    wo_summary_template: str
+    wo_description_template: Optional[str] = None
+    default_priority: WorkOrderPriority = WorkOrderPriority.MEDIUM
+    is_active: bool = True
+    selectedSpareParts: List[SparePartLink] = []
+
+
+class PMTemplateUpdate(SQLModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    frequency_value: Optional[int] = None
+    frequency_unit: Optional[PMFrequencyUnit] = None
+    maintenance_type: Optional[MaintenanceType] = None
+    done_by: Optional[DoneBy] = None
+    vendor_name: Optional[str] = None
+    estimated_duration: Optional[float] = None
+    schedule_on: Optional[date] = None
+    wo_summary_template: Optional[str] = None
+    wo_description_template: Optional[str] = None
+    default_priority: Optional[WorkOrderPriority] = None
+    is_active: Optional[bool] = None
+    selectedSpareParts: Optional[List[SparePartLink]] = None
+
+
+class PMTemplateResponse(SQLModel):
+    id: int
+    name: str
+    description: Optional[str] = None
+    frequency_value: int
+    frequency_unit: PMFrequencyUnit
+    asset_id: int
+    maintenance_type: MaintenanceType
+    done_by: DoneBy
+    vendor_name: Optional[str] = None
+    estimated_duration: Optional[float] = None
+    schedule_on: Optional[date] = None
+    last_generated_date: Optional[datetime] = None  # completed_on
+    next_due_date: Optional[datetime] = None  # next_due
+    is_active: bool
+    wo_summary_template: str
+    wo_description_template: Optional[str] = None
+    default_priority: WorkOrderPriority
+    created_at: datetime
+    spare_parts: List[dict] = []
+    asset: Optional[dict] = None
 
 
 # ============================================
@@ -1139,7 +1242,7 @@ async def bulk_import_assets(file: UploadFile = File(...), session: Session = De
 
     
     contents = await file.read()
-    c# Parse file based on extension
+    # Parse file based on extension
     try:
         if file_ext == 'csv':
             csv_data = io.StringIO(contents.decode('utf-8'))
@@ -1498,7 +1601,22 @@ def update_work_order_status(
             wo.completion_notes = completion_notes
         if time_spent:
             wo.time_spent_hours = time_spent
-    
+        # Auto-update PM template if this work order is linked to one
+        if wo.pm_template_id:
+            pm_template = session.get(PMTemplate, wo.pm_template_id)
+            if pm_template:
+                # Update last generated date
+                pm_template.last_generated_date = datetime.utcnow()
+                
+                # Recalculate next due date
+                if pm_template.frequency_unit == PMFrequencyUnit.DAYS:
+                    pm_template.next_due_date = datetime.utcnow() + timedelta(days=pm_template.frequency_value)
+                elif pm_template.frequency_unit == PMFrequencyUnit.MONTHS:
+                    pm_template.next_due_date = datetime.utcnow() + timedelta(days=pm_template.frequency_value * 30)
+                elif pm_template.frequency_unit == PMFrequencyUnit.HOURS:
+                    pm_template.next_due_date = datetime.utcnow() + timedelta(hours=pm_template.frequency_value)
+                
+                session.add(pm_template)
     session.add(wo)
     session.commit()
     session.refresh(wo)
@@ -1861,27 +1979,105 @@ def export_vendors_to_excel(
 # ============================================
 # PREVENTIVE MAINTENANCE ENDPOINTS
 # ============================================
-@app.post("/pm-templates", response_model=PMTemplate)
-def create_pm_template(pm: PMTemplate, session: Session = Depends(get_session)):
-    # Convert date strings to Python datetime objects
-    pm = convert_pm_template_dates(pm)
+@app.post("/pm-templates", response_model=PMTemplateResponse)
+def create_pm_template(pm_data: PMTemplateCreate, session: Session = Depends(get_session)):
+    # Verify asset exists
+    asset = session.get(Asset, pm_data.asset_id)
+    if not asset:
+        raise HTTPException(status_code=404, detail="Asset not found")
     
-    # Ensure datetime fields are datetime objects
-    pm.created_at = datetime.utcnow()
-    
+    # Create PM Template
+    pm_template = PMTemplate(
+        name=pm_data.name,
+        description=pm_data.description,
+        frequency_value=pm_data.frequency_value,
+        frequency_unit=pm_data.frequency_unit,
+        asset_id=pm_data.asset_id,
+        maintenance_type=pm_data.maintenance_type,
+        done_by=pm_data.done_by,
+        vendor_name=pm_data.vendor_name,
+        estimated_duration=pm_data.estimated_duration,
+        schedule_on=pm_data.schedule_on,
+        wo_summary_template=pm_data.wo_summary_template,
+        wo_description_template=pm_data.wo_description_template,
+        default_priority=pm_data.default_priority,
+        is_active=pm_data.is_active,
+        created_at=datetime.utcnow()
+    )
+
+
     # Calculate next due date
-    if pm.frequency_unit == PMFrequencyUnit.DAYS:
-        pm.next_due_date = datetime.utcnow() + timedelta(days=pm.frequency_value)
-    elif pm.frequency_unit == PMFrequencyUnit.MONTHS:
-        pm.next_due_date = datetime.utcnow() + timedelta(days=pm.frequency_value * 30)
+    if pm_template.frequency_unit == PMFrequencyUnit.DAYS:
+        pm_template.next_due_date = datetime.utcnow() + timedelta(days=pm_template.frequency_value)
+    elif pm_template.frequency_unit == PMFrequencyUnit.MONTHS:
+        pm_template.next_due_date = datetime.utcnow() + timedelta(days=pm_template.frequency_value * 30)
+    elif pm_template.frequency_unit == PMFrequencyUnit.HOURS:
+        # For hours-based, we'll set a default calculation
+        pm_template.next_due_date = datetime.utcnow() + timedelta(hours=pm_template.frequency_value)
     
-    session.add(pm)
+    session.add(pm_template)
     session.commit()
-    session.refresh(pm)
-    return pm
+    session.refresh(pm_template)
+    
+    # Add spare parts links
+    spare_parts_data = []
+    if pm_data.selectedSpareParts:
+        for spare_part in pm_data.selectedSpareParts:
+            # Verify inventory item exists
+            inventory_item = session.get(InventoryItem, spare_part.inventory_item_id)
+            if not inventory_item:
+                continue
+            
+            pm_spare_part = PMSparePart(
+                pm_template_id=pm_template.id,
+                inventory_item_id=spare_part.inventory_item_id,
+                quantity=spare_part.quantity,
+                notes=spare_part.notes,
+                created_at=datetime.utcnow()
+            )
+            session.add(pm_spare_part)
+            spare_parts_data.append({
+                "id": spare_part.inventory_item_id,
+                "inventory_item_id": spare_part.inventory_item_id,
+                "item_name": inventory_item.item_name,
+                "part_number": inventory_item.part_number,
+                "quantity": spare_part.quantity,
+                "notes": spare_part.notes
+            })
+        
+        session.commit()
+    
+    # Prepare response
+    return PMTemplateResponse(
+        id=pm_template.id,
+        name=pm_template.name,
+        description=pm_template.description,
+        frequency_value=pm_template.frequency_value,
+        frequency_unit=pm_template.frequency_unit,
+        asset_id=pm_template.asset_id,
+        maintenance_type=pm_template.maintenance_type,
+        done_by=pm_template.done_by,
+        vendor_name=pm_template.vendor_name,
+        estimated_duration=pm_template.estimated_duration,
+        schedule_on=pm_template.schedule_on,
+        last_generated_date=pm_template.last_generated_date,
+        next_due_date=pm_template.next_due_date,
+        is_active=pm_template.is_active,
+        wo_summary_template=pm_template.wo_summary_template,
+        wo_description_template=pm_template.wo_description_template,
+        default_priority=pm_template.default_priority,
+        created_at=pm_template.created_at,
+        spare_parts=spare_parts_data,
+        asset={
+            "id": asset.id,
+            "asset_id": asset.asset_id,
+            "name": asset.name,
+            "category": asset.category
+        }
+    )
 
 
-@app.get("/pm-templates", response_model=List[PMTemplate])
+@app.get("/pm-templates", response_model=List[PMTemplateResponse])
 def get_pm_templates(
     asset_id: Optional[int] = None,
     is_active: Optional[bool] = None,
@@ -1895,8 +2091,115 @@ def get_pm_templates(
         query = query.where(PMTemplate.is_active == is_active)
     
     templates = session.exec(query).all()
-    return templates
+    # Build response with related data
+    result = []
+    for template in templates:
+        # Get asset
+        asset = session.get(Asset, template.asset_id)
+        
+        # Get spare parts
+        spare_parts_links = session.exec(
+            select(PMSparePart).where(PMSparePart.pm_template_id == template.id)
+        ).all()
+        
+        spare_parts_data = []
+        for link in spare_parts_links:
+            inventory_item = session.get(InventoryItem, link.inventory_item_id)
+            if inventory_item:
+                spare_parts_data.append({
+                    "id": link.id,
+                    "inventory_item_id": link.inventory_item_id,
+                    "item_name": inventory_item.item_name,
+                    "part_number": inventory_item.part_number,
+                    "quantity": link.quantity,
+                    "notes": link.notes
+                })
+        
+        result.append(PMTemplateResponse(
+            id=template.id,
+            name=template.name,
+            description=template.description,
+            frequency_value=template.frequency_value,
+            frequency_unit=template.frequency_unit,
+            asset_id=template.asset_id,
+            maintenance_type=template.maintenance_type,
+            done_by=template.done_by,
+            vendor_name=template.vendor_name,
+            estimated_duration=template.estimated_duration,
+            schedule_on=template.schedule_on,
+            last_generated_date=template.last_generated_date,
+            next_due_date=template.next_due_date,
+            is_active=template.is_active,
+            wo_summary_template=template.wo_summary_template,
+            wo_description_template=template.wo_description_template,
+            default_priority=template.default_priority,
+            created_at=template.created_at,
+            spare_parts=spare_parts_data,
+            asset={
+                "id": asset.id,
+                "asset_id": asset.asset_id,
+                "name": asset.name,
+                "category": asset.category
+            } if asset else None
+        ))
+    
+    return result
 
+
+@app.get("/pm-templates/{pm_id}", response_model=PMTemplateResponse)
+def get_pm_template(pm_id: int, session: Session = Depends(get_session)):
+    template = session.get(PMTemplate, pm_id)
+    if not template:
+        raise HTTPException(status_code=404, detail="PM Template not found")
+    
+    # Get asset
+    asset = session.get(Asset, template.asset_id)
+    
+    # Get spare parts
+    spare_parts_links = session.exec(
+        select(PMSparePart).where(PMSparePart.pm_template_id == template.id)
+    ).all()
+    
+    spare_parts_data = []
+    for link in spare_parts_links:
+        inventory_item = session.get(InventoryItem, link.inventory_item_id)
+        if inventory_item:
+            spare_parts_data.append({
+                "id": link.id,
+                "inventory_item_id": link.inventory_item_id,
+                "item_name": inventory_item.item_name,
+                "part_number": inventory_item.part_number,
+                "quantity": link.quantity,
+                "notes": link.notes
+            })
+    
+    return PMTemplateResponse(
+        id=template.id,
+        name=template.name,
+        description=template.description,
+        frequency_value=template.frequency_value,
+        frequency_unit=template.frequency_unit,
+        asset_id=template.asset_id,
+        maintenance_type=template.maintenance_type,
+        done_by=template.done_by,
+        vendor_name=template.vendor_name,
+        estimated_duration=template.estimated_duration,
+        schedule_on=template.schedule_on,
+        last_generated_date=template.last_generated_date,
+        next_due_date=template.next_due_date,
+        is_active=template.is_active,
+        wo_summary_template=template.wo_summary_template,
+        wo_description_template=template.wo_description_template,
+        default_priority=template.default_priority,
+        created_at=template.created_at,
+        spare_parts=spare_parts_data,
+        asset={
+            "id": asset.id,
+            "asset_id": asset.asset_id,
+            "name": asset.name,
+            "category": asset.category
+        } if asset else None
+    )
 
 @app.get("/pm-templates/due-soon")
 def get_due_soon_pms(days: int = 7, session: Session = Depends(get_session)):
@@ -1910,6 +2213,145 @@ def get_due_soon_pms(days: int = 7, session: Session = Depends(get_session)):
     
     due_pms = session.exec(query).all()
     return due_pms
+
+
+@app.put("/pm-templates/{pm_id}", response_model=PMTemplateResponse)
+def update_pm_template(pm_id: int, pm_data: PMTemplateUpdate, session: Session = Depends(get_session)):
+    pm_template = session.get(PMTemplate, pm_id)
+    if not pm_template:
+        raise HTTPException(status_code=404, detail="PM Template not found")
+    
+    # Update fields if provided
+    if pm_data.name is not None:
+        pm_template.name = pm_data.name
+    if pm_data.description is not None:
+        pm_template.description = pm_data.description
+    if pm_data.frequency_value is not None:
+        pm_template.frequency_value = pm_data.frequency_value
+    if pm_data.frequency_unit is not None:
+        pm_template.frequency_unit = pm_data.frequency_unit
+    if pm_data.maintenance_type is not None:
+        pm_template.maintenance_type = pm_data.maintenance_type
+    if pm_data.done_by is not None:
+        pm_template.done_by = pm_data.done_by
+    if pm_data.vendor_name is not None:
+        pm_template.vendor_name = pm_data.vendor_name
+    if pm_data.estimated_duration is not None:
+        pm_template.estimated_duration = pm_data.estimated_duration
+    if pm_data.schedule_on is not None:
+        pm_template.schedule_on = pm_data.schedule_on
+    if pm_data.wo_summary_template is not None:
+        pm_template.wo_summary_template = pm_data.wo_summary_template
+    if pm_data.wo_description_template is not None:
+        pm_template.wo_description_template = pm_data.wo_description_template
+    if pm_data.default_priority is not None:
+        pm_template.default_priority = pm_data.default_priority
+    if pm_data.is_active is not None:
+        pm_template.is_active = pm_data.is_active
+    
+    # Recalculate next due date if frequency changed
+    if pm_data.frequency_value is not None or pm_data.frequency_unit is not None:
+        if pm_template.frequency_unit == PMFrequencyUnit.DAYS:
+            pm_template.next_due_date = datetime.utcnow() + timedelta(days=pm_template.frequency_value)
+        elif pm_template.frequency_unit == PMFrequencyUnit.MONTHS:
+            pm_template.next_due_date = datetime.utcnow() + timedelta(days=pm_template.frequency_value * 30)
+        elif pm_template.frequency_unit == PMFrequencyUnit.HOURS:
+            pm_template.next_due_date = datetime.utcnow() + timedelta(hours=pm_template.frequency_value)
+    
+    # Update spare parts if provided
+    if pm_data.selectedSpareParts is not None:
+        # Remove existing spare parts
+        existing_parts = session.exec(
+            select(PMSparePart).where(PMSparePart.pm_template_id == pm_id)
+        ).all()
+        for part in existing_parts:
+            session.delete(part)
+        
+        # Add new spare parts
+        for spare_part in pm_data.selectedSpareParts:
+            inventory_item = session.get(InventoryItem, spare_part.inventory_item_id)
+            if inventory_item:
+                pm_spare_part = PMSparePart(
+                    pm_template_id=pm_template.id,
+                    inventory_item_id=spare_part.inventory_item_id,
+                    quantity=spare_part.quantity,
+                    notes=spare_part.notes,
+                    created_at=datetime.utcnow()
+                )
+                session.add(pm_spare_part)
+    
+    session.add(pm_template)
+    session.commit()
+    session.refresh(pm_template)
+    
+    # Get asset
+    asset = session.get(Asset, pm_template.asset_id)
+    
+    # Get spare parts
+    spare_parts_links = session.exec(
+        select(PMSparePart).where(PMSparePart.pm_template_id == pm_template.id)
+    ).all()
+    
+    spare_parts_data = []
+    for link in spare_parts_links:
+        inventory_item = session.get(InventoryItem, link.inventory_item_id)
+        if inventory_item:
+            spare_parts_data.append({
+                "id": link.id,
+                "inventory_item_id": link.inventory_item_id,
+                "item_name": inventory_item.item_name,
+                "part_number": inventory_item.part_number,
+                "quantity": link.quantity,
+                "notes": link.notes
+            })
+    
+    return PMTemplateResponse(
+        id=pm_template.id,
+        name=pm_template.name,
+        description=pm_template.description,
+        frequency_value=pm_template.frequency_value,
+        frequency_unit=pm_template.frequency_unit,
+        asset_id=pm_template.asset_id,
+        maintenance_type=pm_template.maintenance_type,
+        done_by=pm_template.done_by,
+        vendor_name=pm_template.vendor_name,
+        estimated_duration=pm_template.estimated_duration,
+        schedule_on=pm_template.schedule_on,
+        last_generated_date=pm_template.last_generated_date,
+        next_due_date=pm_template.next_due_date,
+        is_active=pm_template.is_active,
+        wo_summary_template=pm_template.wo_summary_template,
+        wo_description_template=pm_template.wo_description_template,
+        default_priority=pm_template.default_priority,
+        created_at=pm_template.created_at,
+        spare_parts=spare_parts_data,
+        asset={
+            "id": asset.id,
+            "asset_id": asset.asset_id,
+            "name": asset.name,
+            "category": asset.category
+        } if asset else None
+    )
+
+
+@app.delete("/pm-templates/{pm_id}")
+def delete_pm_template(pm_id: int, session: Session = Depends(get_session)):
+    pm_template = session.get(PMTemplate, pm_id)
+    if not pm_template:
+        raise HTTPException(status_code=404, detail="PM Template not found")
+    
+    # Delete associated spare parts
+    spare_parts = session.exec(
+        select(PMSparePart).where(PMSparePart.pm_template_id == pm_id)
+    ).all()
+    for part in spare_parts:
+        session.delete(part)
+    
+    # Delete the template
+    session.delete(pm_template)
+    session.commit()
+    
+    return {"message": "PM Template deleted successfully"}
 
 
 @app.post("/pm-templates/{pm_id}/generate-wo")
