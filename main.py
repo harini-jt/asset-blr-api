@@ -125,6 +125,9 @@ class Asset(SQLModel, table=True):
     category: str = Field(index=True)
     status: AssetStatus = Field(default=AssetStatus.ACTIVE)
     
+    # Parent-Child Relationship for Sub-Assets
+    parent_asset_id: Optional[int] = Field(default=None, foreign_key="assets.id")
+    
     # Location & Ownership
     location_id: Optional[int] = Field(default=None, foreign_key="locations.id")
     station_id: Optional[int] = Field(default=None, foreign_key="locations.id")
@@ -802,12 +805,14 @@ def update_asset(asset_id: int, asset_update: Asset, session: Session = Depends(
     # Convert date strings to Python date objects
     asset_update = convert_asset_dates(asset_update)
     
-    asset_data = asset_update.dict(exclude_unset=True)
+    # Get update data - use dict() to include None values for clearing fields
+    asset_data = asset_update.dict(exclude_unset=True, exclude_none=False)
     asset_data["updated_at"] = datetime.utcnow()
     
     # Update asset fields
     for key, value in asset_data.items():
         if key not in ['created_at'] and hasattr(db_asset, key):
+            # Explicitly allow None for optional fields like parent_asset_id
             setattr(db_asset, key, value)
     
     session.add(db_asset)
@@ -843,6 +848,26 @@ def retire_asset(asset_id: int, session: Session = Depends(get_session)):
     session.commit()
     session.refresh(asset)
     return asset
+
+
+@app.get("/assets/{asset_id}/sub-assets", response_model=List[Asset])
+def get_sub_assets(asset_id: int, session: Session = Depends(get_session)):
+    """Get all sub-assets (children) of a parent asset"""
+    asset = session.get(Asset, asset_id)
+    if not asset:
+        raise HTTPException(status_code=404, detail="Asset not found")
+    
+    # Get all assets where parent_asset_id equals the given asset_id
+    sub_assets = session.exec(
+        select(Asset).where(Asset.parent_asset_id == asset_id)
+    ).all()
+    
+    # Compute verification status for each sub-asset
+    for sub_asset in sub_assets:
+        if sub_asset.id:
+            sub_asset.physically_verified = compute_asset_verification_status(sub_asset.id, session)
+    
+    return sub_assets
 
 
 # ============================================
