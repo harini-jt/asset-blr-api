@@ -156,6 +156,7 @@ class Asset(SQLModel, table=True):
     # Tracking
     meter_reading: Optional[float] = None  # For runtime-based PM
     notes: Optional[str] = None
+    physically_verified: bool = Field(default=False)  # Computed field for verification status
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
     
@@ -294,6 +295,7 @@ class InventoryItem(SQLModel, table=True):
     remarks: Optional[str] = None
     
     # Tracking
+    physically_verified: bool = Field(default=False)  # Computed field for verification status
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
     
@@ -347,6 +349,44 @@ class AssetSparePartCreate(SQLModel):
 class AssetSparePartUpdate(SQLModel):
     quantity: Optional[int] = None
     notes: Optional[str] = None
+
+
+# ============================================
+# Models - Physical Verification
+# ============================================
+class PhysicalVerification(SQLModel, table=True):
+    __tablename__ = "physical_verification"
+    
+    id: Optional[int] = Field(default=None, primary_key=True)
+    
+    # Verification Status
+    phy_ver_status: bool = Field(default=False)  # Default as No (False)
+    phy_ver_date: Optional[datetime] = None
+    
+    # Asset Information
+    new_tag: Optional[str] = None
+    physical_location_id: Optional[int] = Field(default=None, foreign_key="locations.id")
+    condition_of_asset: Optional[str] = None
+    
+    # Verification Details
+    verification_done_by: Optional[str] = None
+    next_pv_planned_date: Optional[date] = None
+    comments: Optional[str] = None
+    
+    # Links
+    asset_id: Optional[int] = Field(default=None, foreign_key="assets.id")
+    spare_part_id: Optional[int] = Field(default=None, foreign_key="inventory_items.id")
+    
+    # Tracking
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    
+    # Relationships
+    physical_location_rel: Optional[Location] = Relationship(
+        sa_relationship_kwargs={"foreign_keys": "[PhysicalVerification.physical_location_id]"}
+    )
+    asset_rel: Optional[Asset] = Relationship()
+    spare_part_rel: Optional[InventoryItem] = Relationship()
 
 
 # ============================================
@@ -568,6 +608,111 @@ def convert_inventory_item_dates(item: InventoryItem) -> InventoryItem:
     return item
 
 
+def convert_physical_verification_dates(verification: PhysicalVerification) -> PhysicalVerification:
+    """Convert string dates/datetimes to Python date/datetime objects in a PhysicalVerification"""
+    if verification.phy_ver_date and isinstance(verification.phy_ver_date, str):
+        verification.phy_ver_date = parse_datetime_string(verification.phy_ver_date)
+    if verification.next_pv_planned_date and isinstance(verification.next_pv_planned_date, str):
+        verification.next_pv_planned_date = parse_date_string(verification.next_pv_planned_date)
+    if verification.created_at and isinstance(verification.created_at, str):
+        verification.created_at = parse_datetime_string(verification.created_at)
+    if verification.updated_at and isinstance(verification.updated_at, str):
+        verification.updated_at = parse_datetime_string(verification.updated_at)
+    return verification
+
+
+def compute_asset_verification_status(asset_id: int, session: Session) -> bool:
+    """
+    Compute whether an asset is currently physically verified based on verification records.
+    
+    Logic:
+    1. If no verification records exist, return False
+    2. Get the latest verification record (by phy_ver_date)
+    3. If the latest record has phy_ver_status = False, return False
+    4. If the latest record has phy_ver_status = True:
+       - If next_pv_planned_date is None, return True (verified indefinitely)
+       - If current date is past next_pv_planned_date, return False (verification expired)
+       - Otherwise, return True (currently verified)
+    """
+    from datetime import date as date_type
+    
+    # Get all verification records for this asset, ordered by verification date descending
+    statement = select(PhysicalVerification).where(
+        PhysicalVerification.asset_id == asset_id
+    ).order_by(PhysicalVerification.phy_ver_date.desc())
+    
+    verifications = session.exec(statement).all()
+    
+    # No verification records exist
+    if not verifications:
+        return False
+    
+    # Get the latest verification record
+    latest_verification = verifications[0]
+    
+    # If not verified in the latest record
+    if not latest_verification.phy_ver_status:
+        return False
+    
+    # If verified but no next planned date, consider it verified
+    if not latest_verification.next_pv_planned_date:
+        return True
+    
+    # Check if current date is past the next verification date
+    current_date = date_type.today()
+    if current_date > latest_verification.next_pv_planned_date:
+        return False  # Verification expired
+    
+    # Currently verified and not expired
+    return True
+
+
+def compute_spare_part_verification_status(spare_part_id: int, session: Session) -> bool:
+    """
+    Compute whether a spare part is currently physically verified based on verification records.
+    
+    Logic: Same as asset verification
+    1. If no verification records exist, return False
+    2. Get the latest verification record (by phy_ver_date)
+    3. If the latest record has phy_ver_status = False, return False
+    4. If the latest record has phy_ver_status = True:
+       - If next_pv_planned_date is None, return True (verified indefinitely)
+       - If current date is past next_pv_planned_date, return False (verification expired)
+       - Otherwise, return True (currently verified)
+    """
+    from datetime import date as date_type
+    
+    # Get all verification records for this spare part, ordered by verification date descending
+    statement = select(PhysicalVerification).where(
+        PhysicalVerification.spare_part_id == spare_part_id
+    ).order_by(PhysicalVerification.phy_ver_date.desc())
+    
+    verifications = session.exec(statement).all()
+    
+    # No verification records exist
+    if not verifications:
+        return False
+    
+    # Get the latest verification record
+    latest_verification = verifications[0]
+    
+    # If not verified in the latest record
+    if not latest_verification.phy_ver_status:
+        return False
+    
+    # If verified but no next planned date, consider it verified
+    if not latest_verification.next_pv_planned_date:
+        return True
+    
+    # Check if current date is past the next verification date
+    current_date = date_type.today()
+    if current_date > latest_verification.next_pv_planned_date:
+        return False  # Verification expired
+    
+    # Currently verified and not expired
+    return True
+
+
 # ============================================
 # ASSET REGISTRY ENDPOINTS
 # ============================================
@@ -626,6 +771,12 @@ def get_assets(
         )
     
     assets = session.exec(query).all()
+    
+    # Compute verification status for each asset
+    for asset in assets:
+        if asset.id:
+            asset.physically_verified = compute_asset_verification_status(asset.id, session)
+    
     return assets
 
 
@@ -634,6 +785,11 @@ def get_asset(asset_id: int, session: Session = Depends(get_session)):
     asset = session.get(Asset, asset_id)
     if not asset:
         raise HTTPException(status_code=404, detail="Asset not found")
+    
+    # Compute verification status
+    if asset.id:
+        asset.physically_verified = compute_asset_verification_status(asset.id, session)
+    
     return asset
 
 
@@ -1144,6 +1300,12 @@ def get_inventory_items(
         query = query.where(InventoryItem.stock_on_hand <= InventoryItem.min_stock)
     
     items = session.exec(query).all()
+    
+    # Compute verification status for each spare part
+    for item in items:
+        if item.id:
+            item.physically_verified = compute_spare_part_verification_status(item.id, session)
+    
     return items
 
 
@@ -1152,6 +1314,11 @@ def get_inventory_item(item_id: int, session: Session = Depends(get_session)):
     item = session.get(InventoryItem, item_id)
     if not item:
         raise HTTPException(status_code=404, detail="Spare part not found")
+    
+    # Compute verification status
+    if item.id:
+        item.physically_verified = compute_spare_part_verification_status(item.id, session)
+    
     return item
 
 
@@ -1238,6 +1405,127 @@ def get_work_order_parts(wo_id: int, session: Session = Depends(get_session)):
         })
     
     return result
+
+
+# ============================================
+# PHYSICAL VERIFICATION ENDPOINTS
+# ============================================
+@app.get("/physical-verification", response_model=List[PhysicalVerification])
+def get_physical_verifications(session: Session = Depends(get_session)):
+    """Get all physical verification records"""
+    try:
+        verifications = session.exec(select(PhysicalVerification)).all()
+        return verifications
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching physical verifications: {str(e)}")
+
+
+@app.get("/physical-verification/{verification_id}", response_model=PhysicalVerification)
+def get_physical_verification(verification_id: int, session: Session = Depends(get_session)):
+    """Get a specific physical verification record"""
+    try:
+        verification = session.get(PhysicalVerification, verification_id)
+        if not verification:
+            raise HTTPException(status_code=404, detail="Physical verification record not found")
+        return verification
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching physical verification: {str(e)}")
+
+
+@app.post("/physical-verification", response_model=PhysicalVerification)
+def create_physical_verification(verification: PhysicalVerification, session: Session = Depends(get_session)):
+    """Create a new physical verification record"""
+    try:
+        # Convert date strings to Python date/datetime objects
+        verification = convert_physical_verification_dates(verification)
+        
+        verification.created_at = datetime.utcnow()
+        verification.updated_at = datetime.utcnow()
+        session.add(verification)
+        session.commit()
+        session.refresh(verification)
+        return verification
+    except Exception as e:
+        session.rollback()
+        raise HTTPException(status_code=500, detail=f"Error creating physical verification: {str(e)}")
+
+
+@app.put("/physical-verification/{verification_id}", response_model=PhysicalVerification)
+def update_physical_verification(
+    verification_id: int,
+    verification_data: dict,
+    session: Session = Depends(get_session)
+):
+    """Update a physical verification record"""
+    try:
+        verification = session.get(PhysicalVerification, verification_id)
+        if not verification:
+            raise HTTPException(status_code=404, detail="Physical verification record not found")
+        
+        # Convert date strings to proper Python date/datetime objects
+        if 'phy_ver_date' in verification_data and isinstance(verification_data['phy_ver_date'], str):
+            verification_data['phy_ver_date'] = parse_datetime_string(verification_data['phy_ver_date'])
+        if 'next_pv_planned_date' in verification_data and isinstance(verification_data['next_pv_planned_date'], str):
+            verification_data['next_pv_planned_date'] = parse_date_string(verification_data['next_pv_planned_date'])
+        
+        for key, value in verification_data.items():
+            if hasattr(verification, key):
+                setattr(verification, key, value)
+        
+        verification.updated_at = datetime.utcnow()
+        session.add(verification)
+        session.commit()
+        session.refresh(verification)
+        return verification
+    except HTTPException:
+        raise
+    except Exception as e:
+        session.rollback()
+        raise HTTPException(status_code=500, detail=f"Error updating physical verification: {str(e)}")
+
+
+@app.delete("/physical-verification/{verification_id}")
+def delete_physical_verification(verification_id: int, session: Session = Depends(get_session)):
+    """Delete a physical verification record"""
+    try:
+        verification = session.get(PhysicalVerification, verification_id)
+        if not verification:
+            raise HTTPException(status_code=404, detail="Physical verification record not found")
+        
+        session.delete(verification)
+        session.commit()
+        return {"message": "Physical verification record deleted successfully"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        session.rollback()
+        raise HTTPException(status_code=500, detail=f"Error deleting physical verification: {str(e)}")
+
+
+@app.get("/physical-verification/asset/{asset_id}", response_model=List[PhysicalVerification])
+def get_physical_verifications_by_asset(asset_id: int, session: Session = Depends(get_session)):
+    """Get all physical verification records for a specific asset"""
+    try:
+        verifications = session.exec(
+            select(PhysicalVerification).where(PhysicalVerification.asset_id == asset_id)
+        ).all()
+        return verifications
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching physical verifications for asset: {str(e)}")
+
+
+@app.get("/physical-verification/spare-part/{spare_part_id}", response_model=List[PhysicalVerification])
+def get_physical_verifications_by_spare_part(spare_part_id: int, session: Session = Depends(get_session)):
+    """Get all physical verification records for a specific spare part"""
+    try:
+        verifications = session.exec(
+            select(PhysicalVerification).where(PhysicalVerification.spare_part_id == spare_part_id)
+        ).all()
+        return verifications
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching physical verifications for spare part: {str(e)}")
 
 
 # ============================================
