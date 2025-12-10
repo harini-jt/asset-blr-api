@@ -148,6 +148,7 @@ class Asset(SQLModel, table=True):
     vendor_rel: Optional[Vendor] = Relationship(back_populates="assets")
     work_orders: List["WorkOrderAsset"] = Relationship(back_populates="asset")
     pm_templates: List["PMTemplate"] = Relationship(back_populates="asset")
+    spare_parts: List["AssetSparePart"] = Relationship(back_populates="asset")
 
     #---------------- Removed duplicate invoice fields ----------------#
     
@@ -236,7 +237,7 @@ class PMTemplate(SQLModel, table=True):
 
 
 # ============================================
-# Models - Inventory
+# Models - Spare Parts
 # ============================================
 class InventoryItem(SQLModel, table=True):
     __tablename__ = "inventory_items"
@@ -260,6 +261,7 @@ class InventoryItem(SQLModel, table=True):
     
     # Relationships
     work_order_usage: List["WorkOrderPart"] = Relationship(back_populates="inventory_item")
+    asset_usage: List["AssetSparePart"] = Relationship(back_populates="inventory_item")
 
 
 class WorkOrderPart(SQLModel, table=True):
@@ -273,6 +275,36 @@ class WorkOrderPart(SQLModel, table=True):
     # Relationships
     work_order: WorkOrder = Relationship(back_populates="parts_used")
     inventory_item: InventoryItem = Relationship(back_populates="work_order_usage")
+
+
+# ============================================
+# Models - Asset Spare Parts
+# ============================================
+class AssetSparePart(SQLModel, table=True):
+    __tablename__ = "asset_spare_parts"
+    
+    id: Optional[int] = Field(default=None, primary_key=True)
+    asset_id: int = Field(foreign_key="assets.id")
+    inventory_item_id: int = Field(foreign_key="inventory_items.id")
+    quantity: int = Field(default=1)
+    notes: Optional[str] = None
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    
+    # Relationships
+    asset: Asset = Relationship(back_populates="spare_parts")
+    inventory_item: InventoryItem = Relationship(back_populates="asset_usage")
+
+
+# Request/Response models for Asset Spare Parts
+class AssetSparePartCreate(SQLModel):
+    inventory_item_id: int
+    quantity: int = 1
+    notes: Optional[str] = None
+
+
+class AssetSparePartUpdate(SQLModel):
+    quantity: Optional[int] = None
+    notes: Optional[str] = None
 
 
 # ============================================
@@ -615,6 +647,131 @@ def retire_asset(asset_id: int, session: Session = Depends(get_session)):
     return asset
 
 
+# ============================================
+# ASSET SPARE PARTS ENDPOINTS
+# ============================================
+@app.get("/assets/{asset_id}/spare-parts")
+def get_asset_spare_parts(asset_id: int, session: Session = Depends(get_session)):
+    """Get all spare parts associated with an asset"""
+    asset = session.get(Asset, asset_id)
+    if not asset:
+        raise HTTPException(status_code=404, detail="Asset not found")
+    
+    spare_parts = session.exec(
+        select(AssetSparePart).where(AssetSparePart.asset_id == asset_id)
+    ).all()
+    
+    # Enrich with inventory item details
+    result = []
+    for sp in spare_parts:
+        item = session.get(InventoryItem, sp.inventory_item_id)
+        if item:
+            result.append({
+                "id": sp.id,
+                "asset_id": sp.asset_id,
+                "inventory_item_id": sp.inventory_item_id,
+                "quantity": sp.quantity,
+                "notes": sp.notes,
+                "created_at": sp.created_at,
+                "item_name": item.item_name,
+                "part_number": item.part_number,
+                "unit_cost": item.unit_cost,
+                "stock_on_hand": item.stock_on_hand
+            })
+    
+    return result
+
+
+@app.post("/assets/{asset_id}/spare-parts")
+def add_spare_part_to_asset(
+    asset_id: int,
+    spare_part_data: AssetSparePartCreate,
+    session: Session = Depends(get_session)
+):
+    """Add a spare part to an asset"""
+    asset = session.get(Asset, asset_id)
+    if not asset:
+        raise HTTPException(status_code=404, detail="Asset not found")
+    
+    item = session.get(InventoryItem, spare_part_data.inventory_item_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="Spare part not found")
+    
+    # Check if already exists
+    existing = session.exec(
+        select(AssetSparePart).where(
+            AssetSparePart.asset_id == asset_id,
+            AssetSparePart.inventory_item_id == spare_part_data.inventory_item_id
+        )
+    ).first()
+    
+    if existing:
+        raise HTTPException(status_code=400, detail="This spare part is already associated with this asset")
+    
+    spare_part = AssetSparePart(
+        asset_id=asset_id,
+        inventory_item_id=spare_part_data.inventory_item_id,
+        quantity=spare_part_data.quantity,
+        notes=spare_part_data.notes
+    )
+    
+    session.add(spare_part)
+    session.commit()
+    session.refresh(spare_part)
+    
+    return {
+        "id": spare_part.id,
+        "asset_id": spare_part.asset_id,
+        "inventory_item_id": spare_part.inventory_item_id,
+        "quantity": spare_part.quantity,
+        "notes": spare_part.notes,
+        "created_at": spare_part.created_at,
+        "item_name": item.item_name,
+        "part_number": item.part_number
+    }
+
+
+@app.put("/assets/{asset_id}/spare-parts/{spare_part_id}")
+def update_asset_spare_part(
+    asset_id: int,
+    spare_part_id: int,
+    update_data: AssetSparePartUpdate,
+    session: Session = Depends(get_session)
+):
+    """Update quantity or notes for an asset's spare part"""
+    spare_part = session.get(AssetSparePart, spare_part_id)
+    if not spare_part or spare_part.asset_id != asset_id:
+        raise HTTPException(status_code=404, detail="Spare part association not found")
+    
+    if update_data.quantity is not None:
+        spare_part.quantity = update_data.quantity
+    if update_data.notes is not None:
+        spare_part.notes = update_data.notes
+    
+    session.add(spare_part)
+    session.commit()
+    session.refresh(spare_part)
+    
+    return spare_part
+
+
+@app.delete("/assets/{asset_id}/spare-parts/{spare_part_id}")
+def remove_spare_part_from_asset(
+    asset_id: int,
+    spare_part_id: int,
+    session: Session = Depends(get_session)
+):
+    """Remove a spare part from an asset"""
+    spare_part = session.get(AssetSparePart, spare_part_id)
+    if not spare_part or spare_part.asset_id != asset_id:
+        raise HTTPException(status_code=404, detail="Spare part association not found")
+    
+    session.delete(spare_part)
+    session.commit()
+    
+    return {"message": "Spare part removed from asset successfully"}
+
+
 @app.post("/assets/bulk-import")
 async def bulk_import_assets(file: UploadFile = File(...), session: Session = Depends(get_session)):
     """
@@ -906,7 +1063,7 @@ def generate_work_order_from_pm(pm_id: int, session: Session = Depends(get_sessi
 
 
 # ============================================
-# INVENTORY ENDPOINTS
+# SPARE PARTS ENDPOINTS
 # ============================================
 @app.post("/inventory", response_model=InventoryItem)
 def create_inventory_item(item: InventoryItem, session: Session = Depends(get_session)):
@@ -927,7 +1084,7 @@ def create_inventory_item(item: InventoryItem, session: Session = Depends(get_se
             raise HTTPException(status_code=400, detail=f"Part number '{item.part_number}' already exists. Please use a unique part number.")
         else:
             # Re-raise other errors with more context
-            raise HTTPException(status_code=400, detail=f"Error creating inventory item: {str(e)}")
+            raise HTTPException(status_code=400, detail=f"Error creating spare part: {str(e)}")
     
     session.refresh(item)
     return item
@@ -951,7 +1108,7 @@ def get_inventory_items(
 def get_inventory_item(item_id: int, session: Session = Depends(get_session)):
     item = session.get(InventoryItem, item_id)
     if not item:
-        raise HTTPException(status_code=404, detail="Inventory item not found")
+        raise HTTPException(status_code=404, detail="Spare part not found")
     return item
 
 
@@ -963,7 +1120,7 @@ def update_inventory_item(
 ):
     db_item = session.get(InventoryItem, item_id)
     if not db_item:
-        raise HTTPException(status_code=404, detail="Inventory item not found")
+        raise HTTPException(status_code=404, detail="Spare part not found")
     
     # Convert date strings to Python datetime objects
     item_update = convert_inventory_item_dates(item_update)
@@ -989,14 +1146,14 @@ def add_parts_to_work_order(
     quantity: int,
     session: Session = Depends(get_session)
 ):
-    """Add parts to work order and deduct from inventory"""
+    """Add spare parts to work order and deduct from inventory"""
     wo = session.get(WorkOrder, wo_id)
     item = session.get(InventoryItem, inventory_item_id)
     
     if not wo:
         raise HTTPException(status_code=404, detail="Work Order not found")
     if not item:
-        raise HTTPException(status_code=404, detail="Inventory item not found")
+        raise HTTPException(status_code=404, detail="Spare part not found")
     
     if item.stock_on_hand < quantity:
         raise HTTPException(status_code=400, detail="Insufficient stock")
@@ -1016,12 +1173,12 @@ def add_parts_to_work_order(
         session.add(item)
     
     session.commit()
-    return {"message": "Parts added to work order", "remaining_stock": item.stock_on_hand}
+    return {"message": "Spare parts added to work order", "remaining_stock": item.stock_on_hand}
 
 
 @app.get("/work-orders/{wo_id}/parts")
 def get_work_order_parts(wo_id: int, session: Session = Depends(get_session)):
-    """Get all parts used in a work order"""
+    """Get all spare parts used in a work order"""
     parts = session.exec(
         select(WorkOrderPart).where(WorkOrderPart.work_order_id == wo_id)
     ).all()
