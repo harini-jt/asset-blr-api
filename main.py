@@ -531,7 +531,8 @@ app.add_middleware(
     allow_origins=[
         "http://localhost:5173",  # Local Vite dev server
         "http://localhost:3000",  # Alternative local port
-        "https://asset-blr-ltf4b4sj4-surajs-projects-a978d895.vercel.app",  # Production frontend
+        "https://asset-blr-ui.vercel.app",  # Production frontend (current)
+        "https://asset-blr-ltf4b4sj4-surajs-projects-a978d895.vercel.app",  # Old production frontend
         "https://*.vercel.app",  # All Vercel preview deployments
     ],
     allow_credentials=True,
