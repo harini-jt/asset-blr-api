@@ -569,6 +569,21 @@ def health_check():
     }
 
 
+@app.get("/cors-test")
+def cors_test():
+    """Test endpoint to verify CORS configuration"""
+    return {
+        "message": "CORS test successful",
+        "timestamp": datetime.utcnow().isoformat(),
+        "allowed_origins": [
+            "http://localhost:5173",
+            "http://localhost:3000",
+            "https://asset-blr-ui.vercel.app",
+            "https://asset-blr-ltf4b4sj4-surajs-projects-a978d895.vercel.app",
+        ]
+    }
+
+
 # ============================================
 # LOCATION ENDPOINTS
 # ============================================
