@@ -525,16 +525,12 @@ class PhysicalVerification(SQLModel, table=True):
 # ============================================
 app = FastAPI(title="Asset Manager API", version="1.0.0")
 
-# CORS Middleware - Allow both localhost and production frontend
-# Using regex pattern for Vercel deployments to handle all preview URLs
+# CORS Middleware - Allow all origins for now to debug
+# TODO: Restrict this in production after confirming it works
 app.add_middleware(
     CORSMiddleware,
-    allow_origin_regex=r"https://(asset-blr-ui|asset-blr-ltf4b4sj4-surajs-projects-a978d895)\.vercel\.app",
-    allow_origins=[
-        "http://localhost:5173",  # Local Vite dev server
-        "http://localhost:3000",  # Alternative local port
-    ],
-    allow_credentials=True,
+    allow_origins=["*"],  # Allow all origins temporarily
+    allow_credentials=False,  # Must be False when using "*"
     allow_methods=["*"],
     allow_headers=["*"],
 )
