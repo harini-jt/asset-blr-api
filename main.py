@@ -525,15 +525,32 @@ class PhysicalVerification(SQLModel, table=True):
 # ============================================
 app = FastAPI(title="Asset Manager API", version="1.0.0")
 
-# CORS Middleware - Allow all origins for now to debug
-# TODO: Restrict this in production after confirming it works
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # Allow all origins temporarily
-    allow_credentials=False,  # Must be False when using "*"
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# CORS Middleware - Allow frontend from IBM Cloud and localhost
+# Use environment variable for production flexibility
+ALLOWED_ORIGINS = os.getenv(
+    "CORS_ORIGINS",
+    "http://localhost:5173,http://localhost:3000"
+).split(",")
+
+# Add wildcard for now during deployment, remove later for security
+ALLOW_ALL_CORS = os.getenv("ALLOW_ALL_CORS", "true").lower() == "true"
+
+if ALLOW_ALL_CORS:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],  # Temporary: Allow all origins during deployment
+        allow_credentials=False,  # Must be False when using "*"
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+else:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=ALLOWED_ORIGINS,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
 
 @app.on_event("startup")
