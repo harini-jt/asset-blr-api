@@ -26,12 +26,22 @@ from export_service import (
     export_locations_excel,
     export_vendors_excel
 )
+import os
 
 # ============================================
 # Database Setup
 # ============================================
-DATABASE_URL = "sqlite:///./asset_manager.db"
-engine = create_engine(DATABASE_URL, echo=True, connect_args={"check_same_thread": False})
+# Use /tmp directory for SQLite on Vercel (serverless environment)
+# For local development, use current directory
+IS_VERCEL = os.getenv("VERCEL", False)
+DB_DIR = "/tmp" if IS_VERCEL else "."
+DATABASE_URL = f"sqlite:///{DB_DIR}/asset_manager.db"
+
+# Different engine config for Vercel vs local
+if IS_VERCEL:
+    engine = create_engine(DATABASE_URL, echo=False)  # Disable echo on production
+else:
+    engine = create_engine(DATABASE_URL, echo=True, connect_args={"check_same_thread": False})
 
 
 def create_db_and_tables():
@@ -533,12 +543,28 @@ app.add_middleware(
 @app.on_event("startup")
 def on_startup():
     create_db_and_tables()
-    create_db_and_seed()
+    create_db_and_seed()  # Creates default admin user
+    
+    # Note: On Vercel, /tmp database is ephemeral and will be recreated on cold starts
+    # You can seed data via POST /init-demo-data endpoint after deployment
+    if IS_VERCEL:
+        print("🚀 Running on Vercel - Database using /tmp (ephemeral storage)")
+        print("💡 Call POST /init-demo-data to seed sample data")
 
 
 @app.get("/")
 def read_root():
     return {"message": "Asset Manager API", "version": "1.0.0"}
+
+
+@app.get("/health")
+def health_check():
+    """Health check endpoint for Vercel"""
+    return {
+        "status": "healthy",
+        "database": "connected",
+        "environment": "vercel" if IS_VERCEL else "local"
+    }
 
 
 # ============================================

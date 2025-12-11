@@ -5,7 +5,10 @@ import hashlib
 import secrets
 import os
 
-DB_URL = "sqlite:///auth.db"
+# Use /tmp directory for SQLite on Vercel (serverless environment)
+IS_VERCEL = os.getenv("VERCEL", False)
+DB_DIR = "/tmp" if IS_VERCEL else "."
+DB_URL = f"sqlite:///{DB_DIR}/auth.db"
 engine = create_engine(DB_URL, echo=False)
 
 class User(SQLModel, table=True):
