@@ -140,7 +140,7 @@ dmypy.json
 cython_debug/
 
 # Database files
-*.db
+# *.db
 *.db-journal
 *.sqlite
 *.sqlite3
