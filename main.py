@@ -2265,6 +2265,20 @@ def get_due_soon_pms(days: int = 7, session: Session = Depends(get_session)):
     return due_pms
 
 
+@app.get("/pm-templates/hours-due")
+def get_hours_based_pms_due(session: Session = Depends(get_session)):
+    """Get hours-based PM templates that are currently due"""
+    query = select(PMTemplate).where(
+        PMTemplate.frequency_unit == PMFrequencyUnit.HOURS,
+        PMTemplate.is_active == True,
+        PMTemplate.next_due_date != None,
+        PMTemplate.next_due_date <= datetime.utcnow()
+    )
+    
+    due_pms = session.exec(query).all()
+    return due_pms
+
+
 @app.put("/pm-templates/{pm_id}", response_model=PMTemplateResponse)
 def update_pm_template(pm_id: int, pm_data: PMTemplateUpdate, session: Session = Depends(get_session)):
     pm_template = session.get(PMTemplate, pm_id)
@@ -2869,6 +2883,16 @@ def get_dashboard_stats(session: Session = Depends(get_session)):
         select(InventoryItem).where(InventoryItem.physically_verified == False)
     ).all())
     
+    # PM hours due
+    pm_hours_due = len(session.exec(
+        select(PMTemplate).where(
+            PMTemplate.frequency_unit == PMFrequencyUnit.HOURS,
+            PMTemplate.is_active == True,
+            PMTemplate.next_due_date != None,
+            PMTemplate.next_due_date <= datetime.utcnow()
+        )
+    ).all())
+    
     # Assets by status
     assets_by_status = {}
     for status in AssetStatus:
@@ -2883,6 +2907,81 @@ def get_dashboard_stats(session: Session = Depends(get_session)):
     # Count assets with no state
     assets_by_state["Not Set"] = len(session.exec(select(Asset).where(Asset.state == None)).all())
     
+    # Work orders by priority
+    work_orders_by_priority = {}
+    for priority in WorkOrderPriority:
+        count = len(session.exec(select(WorkOrder).where(WorkOrder.priority == priority)).all())
+        work_orders_by_priority[priority.value] = count
+    
+    # Financial metrics
+    total_asset_value = sum([asset.purchase_cost for asset in session.exec(select(Asset)).all() if asset.purchase_cost])
+    total_inventory_value = sum([
+        (item.stock_on_hand * item.unit_cost) 
+        for item in session.exec(select(InventoryItem)).all() 
+        if item.unit_cost
+    ])
+    
+    # Top 5 assets by maintenance frequency (work order count)
+    from sqlalchemy import func
+    top_assets_query = (
+        select(Asset.id, Asset.asset_id, Asset.name, func.count(WorkOrderAsset.work_order_id).label('work_order_count'))
+        .join(WorkOrderAsset, Asset.id == WorkOrderAsset.asset_id)
+        .group_by(Asset.id, Asset.asset_id, Asset.name)
+        .order_by(func.count(WorkOrderAsset.work_order_id).desc())
+        .limit(5)
+    )
+    top_assets_raw = session.exec(top_assets_query).all()
+    top_assets_by_maintenance = [
+        {
+            "asset_id": row[1],
+            "asset_name": row[2],
+            "work_order_count": row[3]
+        }
+        for row in top_assets_raw
+    ]
+    
+    # Monthly work order completion trend (last 6 months)
+    monthly_completions = []
+    current_date = datetime.now()
+    
+    for i in range(5, -1, -1):  # Last 6 months
+        # Calculate month boundaries
+        year = current_date.year
+        month = current_date.month - i
+        
+        # Handle year rollover
+        while month <= 0:
+            month += 12
+            year -= 1
+        
+        month_start = datetime(year, month, 1, 0, 0, 0)
+        
+        # Calculate next month for end boundary
+        next_month = month + 1
+        next_year = year
+        if next_month > 12:
+            next_month = 1
+            next_year += 1
+        
+        if i == 0:
+            month_end = current_date
+        else:
+            month_end = datetime(next_year, next_month, 1, 0, 0, 0)
+        
+        completed_count = len(session.exec(
+            select(WorkOrder).where(
+                WorkOrder.status == WorkOrderStatus.COMPLETED,
+                WorkOrder.completed_at >= month_start,
+                WorkOrder.completed_at < month_end
+            )
+        ).all())
+        
+        month_name = month_start.strftime("%b %Y")
+        monthly_completions.append({
+            "month": month_name,
+            "completed": completed_count
+        })
+    
     return {
         "total_assets": total_assets,
         "active_assets": active_assets,
@@ -2895,8 +2994,14 @@ def get_dashboard_stats(session: Session = Depends(get_session)):
         "overdue_work_orders": overdue_work_orders,
         "assets_not_verified": assets_not_verified,
         "spares_not_verified": spares_not_verified,
+        "pm_hours_due": pm_hours_due,
         "assets_by_status": assets_by_status,
-        "assets_by_state": assets_by_state
+        "assets_by_state": assets_by_state,
+        "work_orders_by_priority": work_orders_by_priority,
+        "total_asset_value": total_asset_value,
+        "total_inventory_value": total_inventory_value,
+        "top_assets_by_maintenance": top_assets_by_maintenance,
+        "monthly_work_order_completions": monthly_completions
     }
 
 
