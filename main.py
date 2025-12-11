@@ -1019,6 +1019,21 @@ def get_assets(
     return assets
 
 
+@app.get("/assets/not-verified", response_model=List[Asset])
+def get_assets_not_verified(session: Session = Depends(get_session)):
+    """Get assets that have not been physically verified"""
+    query = select(Asset).where(Asset.physically_verified == False)
+    assets = session.exec(query).all()
+    
+    # Compute verification status for each asset (in case it's a computed field)
+    for asset in assets:
+        if asset.id:
+            asset.physically_verified = compute_asset_verification_status(asset.id, session)
+    
+    # Filter only those that are still not verified
+    return [asset for asset in assets if not asset.physically_verified]
+
+
 @app.get("/assets/{asset_id}", response_model=Asset)
 def get_asset(asset_id: int, session: Session = Depends(get_session)):
     asset = session.get(Asset, asset_id)
@@ -1421,6 +1436,38 @@ def get_work_orders(
             # Add 1 day to include the entire end date
             to_date = to_date + timedelta(days=1)
             query = query.where(WorkOrder.due_date < to_date)
+    
+    work_orders = session.exec(query).all()
+    return work_orders
+
+
+@app.get("/work-orders/due-next-week", response_model=List[WorkOrder])
+def get_work_orders_due_next_week(session: Session = Depends(get_session)):
+    """Get work orders due in the next 7 days"""
+    today = date.today()
+    next_week = today + timedelta(days=7)
+    
+    query = select(WorkOrder).where(
+        WorkOrder.due_date != None,
+        WorkOrder.due_date >= today,
+        WorkOrder.due_date <= next_week,
+        WorkOrder.status.in_([WorkOrderStatus.OPEN, WorkOrderStatus.IN_PROGRESS])
+    )
+    
+    work_orders = session.exec(query).all()
+    return work_orders
+
+
+@app.get("/work-orders/overdue", response_model=List[WorkOrder])
+def get_overdue_work_orders(session: Session = Depends(get_session)):
+    """Get work orders that are past their due date"""
+    today = date.today()
+    
+    query = select(WorkOrder).where(
+        WorkOrder.due_date != None,
+        WorkOrder.due_date < today,
+        WorkOrder.status.in_([WorkOrderStatus.OPEN, WorkOrderStatus.IN_PROGRESS])
+    )
     
     work_orders = session.exec(query).all()
     return work_orders
@@ -2482,6 +2529,21 @@ def get_inventory_items(
     return items
 
 
+@app.get("/inventory/not-verified", response_model=List[InventoryItem])
+def get_inventory_not_verified(session: Session = Depends(get_session)):
+    """Get inventory items (spare parts) that have not been physically verified"""
+    query = select(InventoryItem).where(InventoryItem.physically_verified == False)
+    items = session.exec(query).all()
+    
+    # Compute verification status for each spare part (in case it's a computed field)
+    for item in items:
+        if item.id:
+            item.physically_verified = compute_spare_part_verification_status(item.id, session)
+    
+    # Filter only those that are still not verified
+    return [item for item in items if not item.physically_verified]
+
+
 @app.get("/inventory/{item_id}", response_model=InventoryItem)
 def get_inventory_item(item_id: int, session: Session = Depends(get_session)):
     item = session.get(InventoryItem, item_id)
@@ -2759,6 +2821,10 @@ def get_physical_verifications_by_spare_part(spare_part_id: int, session: Sessio
 @app.get("/stats/dashboard")
 def get_dashboard_stats(session: Session = Depends(get_session)):
     """Get overall statistics for dashboard"""
+    today = date.today()
+    next_week = today + timedelta(days=7)
+    
+    # Existing stats
     total_assets = len(session.exec(select(Asset)).all())
     active_assets = len(session.exec(select(Asset).where(Asset.status == AssetStatus.ACTIVE)).all())
     
@@ -2777,6 +2843,46 @@ def get_dashboard_stats(session: Session = Depends(get_session)):
         )
     ).all())
     
+    # New stats
+    work_orders_due_next_week = len(session.exec(
+        select(WorkOrder).where(
+            WorkOrder.due_date != None,
+            WorkOrder.due_date >= today,
+            WorkOrder.due_date <= next_week,
+            WorkOrder.status.in_([WorkOrderStatus.OPEN, WorkOrderStatus.IN_PROGRESS])
+        )
+    ).all())
+    
+    overdue_work_orders = len(session.exec(
+        select(WorkOrder).where(
+            WorkOrder.due_date != None,
+            WorkOrder.due_date < today,
+            WorkOrder.status.in_([WorkOrderStatus.OPEN, WorkOrderStatus.IN_PROGRESS])
+        )
+    ).all())
+    
+    assets_not_verified = len(session.exec(
+        select(Asset).where(Asset.physically_verified == False)
+    ).all())
+    
+    spares_not_verified = len(session.exec(
+        select(InventoryItem).where(InventoryItem.physically_verified == False)
+    ).all())
+    
+    # Assets by status
+    assets_by_status = {}
+    for status in AssetStatus:
+        count = len(session.exec(select(Asset).where(Asset.status == status)).all())
+        assets_by_status[status.value] = count
+    
+    # Assets by state
+    assets_by_state = {}
+    for state in AssetState:
+        count = len(session.exec(select(Asset).where(Asset.state == state)).all())
+        assets_by_state[state.value] = count
+    # Count assets with no state
+    assets_by_state["Not Set"] = len(session.exec(select(Asset).where(Asset.state == None)).all())
+    
     return {
         "total_assets": total_assets,
         "active_assets": active_assets,
@@ -2784,7 +2890,13 @@ def get_dashboard_stats(session: Session = Depends(get_session)):
         "open_work_orders": open_wos,
         "in_progress_work_orders": in_progress_wos,
         "low_stock_items": low_stock_items,
-        "due_pms_next_7_days": due_pms
+        "pm_due_soon": due_pms,
+        "work_orders_due_next_week": work_orders_due_next_week,
+        "overdue_work_orders": overdue_work_orders,
+        "assets_not_verified": assets_not_verified,
+        "spares_not_verified": spares_not_verified,
+        "assets_by_status": assets_by_status,
+        "assets_by_state": assets_by_state
     }
 
 
