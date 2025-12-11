@@ -2883,7 +2883,7 @@ def get_dashboard_stats(session: Session = Depends(get_session)):
         select(InventoryItem).where(InventoryItem.physically_verified == False)
     ).all())
     
-    # PM hours due
+    # PM hours due (count of hours-based PMs that are overdue)
     pm_hours_due = len(session.exec(
         select(PMTemplate).where(
             PMTemplate.frequency_unit == PMFrequencyUnit.HOURS,
@@ -2892,6 +2892,18 @@ def get_dashboard_stats(session: Session = Depends(get_session)):
             PMTemplate.next_due_date <= datetime.utcnow()
         )
     ).all())
+    
+    # PM hours report - Total estimated hours for all due PMs (all frequency types)
+    due_pms_all = session.exec(
+        select(PMTemplate).where(
+            PMTemplate.is_active == True,
+            PMTemplate.next_due_date != None,
+            PMTemplate.next_due_date <= datetime.utcnow()
+        )
+    ).all()
+    
+    total_pm_hours_due = sum([pm.estimated_duration for pm in due_pms_all if pm.estimated_duration])
+    pm_count_due = len(due_pms_all)
     
     # Assets by status
     assets_by_status = {}
@@ -2995,6 +3007,8 @@ def get_dashboard_stats(session: Session = Depends(get_session)):
         "assets_not_verified": assets_not_verified,
         "spares_not_verified": spares_not_verified,
         "pm_hours_due": pm_hours_due,
+        "total_pm_hours_due": total_pm_hours_due,
+        "pm_count_due": pm_count_due,
         "assets_by_status": assets_by_status,
         "assets_by_state": assets_by_state,
         "work_orders_by_priority": work_orders_by_priority,
