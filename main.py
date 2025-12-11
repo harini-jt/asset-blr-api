@@ -515,10 +515,15 @@ class PhysicalVerification(SQLModel, table=True):
 # ============================================
 app = FastAPI(title="Asset Manager API", version="1.0.0")
 
-# CORS Middleware
+# CORS Middleware - Allow both localhost and production frontend
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "http://localhost:5173",  # Local Vite dev server
+        "http://localhost:3000",  # Alternative local port
+        "https://asset-blr-ltf4b4sj4-surajs-projects-a978d895.vercel.app",  # Production frontend
+        "https://*.vercel.app",  # All Vercel preview deployments
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -2901,7 +2906,7 @@ def get_dashboard_stats(session: Session = Depends(get_session)):
             PMTemplate.next_due_date <= datetime.utcnow()
         )
     ).all()
-    
+    #test
     total_pm_hours_due = sum([pm.estimated_duration for pm in due_pms_all if pm.estimated_duration])
     pm_count_due = len(due_pms_all)
     
