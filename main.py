@@ -550,7 +550,7 @@ def on_startup():
 
 @app.get("/")
 def read_root():
-    return {"message": "Asset Manager API", "version": "1.0.0"}
+    return {"message": "Asset Manager API", "version": "1.0.1", "cors": "allow-all"}  # Updated to verify deployment
 
 
 @app.get("/health")
