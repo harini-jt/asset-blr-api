@@ -10,6 +10,8 @@ from typing import Optional, List
 from datetime import datetime, date, timedelta
 from enum import Enum
 import pandas as pd
+from auth import create_db_and_seed, authenticate_user, create_token_for_user, get_user_by_token
+from pydantic import BaseModel
 
 # Import export service
 from export_service import (
@@ -526,6 +528,7 @@ app.add_middleware(
 @app.on_event("startup")
 def on_startup():
     create_db_and_tables()
+    create_db_and_seed()
 
 
 @app.get("/")
@@ -2360,15 +2363,23 @@ def generate_work_order_from_pm(pm_id: int, session: Session = Depends(get_sessi
     if not pm:
         raise HTTPException(status_code=404, detail="PM Template not found")
     
+    # Get the asset to replace placeholders
+    asset = session.get(Asset, pm.asset_id)
+    asset_name = asset.name if asset else "Unknown Asset"
+    
     # Generate WO number
     wo_count = len(session.exec(select(WorkOrder)).all())
     wo_number = f"WO-PM-{wo_count + 1:05d}"
     
+    # Replace placeholders in templates
+    summary = pm.wo_summary_template.replace("{asset_name}", asset_name)
+    description = pm.wo_description_template.replace("{asset_name}", asset_name) if pm.wo_description_template else None
+    
     # Create Work Order
     work_order = WorkOrder(
         wo_number=wo_number,
-        summary=pm.wo_summary_template,
-        description=pm.wo_description_template,
+        summary=summary,
+        description=description,
         priority=pm.default_priority,
         status=WorkOrderStatus.OPEN,
         pm_template_id=pm.id
@@ -2381,6 +2392,16 @@ def generate_work_order_from_pm(pm_id: int, session: Session = Depends(get_sessi
     # Link to asset
     link = WorkOrderAsset(work_order_id=work_order.id, asset_id=pm.asset_id)
     session.add(link)
+    
+    # Copy spare parts from PM template to work order
+    if pm.spare_parts:
+        for pm_spare in pm.spare_parts:
+            wo_spare = WorkOrderPart(
+                work_order_id=work_order.id,
+                inventory_item_id=pm_spare.inventory_item_id,
+                quantity_used=pm_spare.quantity
+            )
+            session.add(wo_spare)
     
     # Update PM template
     pm.last_generated_date = datetime.utcnow()
@@ -2767,4 +2788,65 @@ def get_dashboard_stats(session: Session = Depends(get_session)):
     }
 
 
+class SignupRequest(BaseModel):
+    username: str
+    email: str
+    password: str
+
+class AuthResponse(BaseModel):
+    token: str
+    user: Optional[dict] = None
+
+
+@app.post("/auth/login")
+def auth_login(credentials: dict):
+    username = credentials.get("username")
+    password = credentials.get("password")
+    user = authenticate_user(username, password)
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+    token = create_token_for_user(user.id)
+    return {"token": token, "user": {"id": user.id, "username": user.username, "email": user.email}}
+
+
+@app.post("/auth/signup", response_model=AuthResponse)
+def signup(request: SignupRequest):
+    """Register a new user"""
+    from auth import get_session as get_auth_session, _hash_password, User
+    
+    session = get_auth_session()
+    
+    try:
+        # Check if username already exists
+        stmt = select(User).where(User.username == request.username)
+        existing_user = session.exec(stmt).first()
+        
+        if existing_user:
+            raise HTTPException(status_code=400, detail="Username already exists")
+        
+        # Create new user
+        new_user = User(
+            username=request.username,
+            email=request.email,
+            password_hash=_hash_password(request.password),
+            is_active=True
+        )
+        session.add(new_user)
+        session.commit()
+        session.refresh(new_user)
+        
+        # Generate token
+        token = create_token_for_user(new_user.id)
+        
+        return AuthResponse(
+            token=token,
+            user={"id": new_user.id, "username": new_user.username, "email": new_user.email}
+        )
+    except Exception as e:
+        session.rollback()
+        if isinstance(e, HTTPException):
+            raise e
+        raise HTTPException(status_code=400, detail=str(e))
+    finally:
+        session.close()
 
